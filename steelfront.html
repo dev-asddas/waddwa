@@ -1242,7 +1242,7 @@
 // errors are collected, and a failure turns the boot screen into a diagnostic panel. No personal data is collected:
 // build, stage, error text, browser/engine version, WebGL support and the GPU renderer string.
 (() => {
-  const B = window.__SF_BOOT = { build: "pass 54 r5 (SAS-5) · 2026-11-23", stage: "html", stages: [], errors: [], t0: performance.now(), ready: false, failed: false,
+  const B = window.__SF_BOOT = { build: "pass 54 r6 (SAS-5) · 2026-11-23", stage: "html", stages: [], errors: [], t0: performance.now(), ready: false, failed: false,
     fail: (/[?&]bootfail=([a-z]+)/.exec(location.search) || [])[1] || "" }; // ?bootfail=webgl|storage|shader|shaderall|throw: test hooks only
   B.src = "<!DOCTYPE html>\n" + document.documentElement.outerHTML + "\n"; // clean copy for the download button (taken before anything changes)
   const $b = q => document.querySelector("#boot " + q);
@@ -8247,11 +8247,11 @@ function hitTank(t, a, b) {
   return best;
 }
 // first hit along segment a->b: tanks, buildings, ground (and, for shots in flight, the other side's soldiers)
-function trace(a, b, ignore, inf = false) {
+function trace(a, b, ignore, inf = false, ignore2 = null) {
   let best = null;
   const mid = vlerp(a, b, 0.5), half = vlen(vsub(b, a)) / 2;
   for (const t of tanks) {
-    if (t === ignore) continue;
+    if (t === ignore || t === ignore2) continue;
     const dx = t.pos[0] - mid[0], dz = t.pos[2] - mid[2], r = half + Math.max(6, t.type.rad + 1);
     if (dx * dx + dz * dz > r * r) continue;
     const h = hitTank(t, a, b);
@@ -8299,7 +8299,9 @@ function updateShells(dt) {
     // proximity fuse: a lock-on rocket bursts next to the aircraft it is chasing
     const tg = s.guided && s.target;
     if (tg && tg.alive && tg.type.air && segSphere(p0, p1, center(tg), LOCK.fuse)) { explode(center(tg), s.he, s.owner, tg, s, null); shells.splice(i, 1); continue; }
-    const hit = trace(p0, p1, s.owner, true);
+    // SAS-5 (r6): a rocket fired by a marine on a deck clears his own ship (it started inside its hull volume and burst on it at once)
+    const skip = s.deck && vlen(vsub(p1, s.start)) < s.deck.type.L ? s.deck : null;
+    const hit = trace(p0, p1, s.owner, true, skip);
     if (hit) { impact(s, hit); shells.splice(i, 1); continue; }
     if (!s.whiz && !s.small && s.kind !== "bomb" && player && player.alive && s.owner && s.owner.team !== player.team && segSphere(p0, p1, center(player), 14)) { s.whiz = true; sfxWhiz(p1); }
     s.p = p1;
@@ -14129,14 +14131,24 @@ function footStep(p, dt) {
 // soldier within the launcher's range and in clear view, the seeker locks after FLOCK.time; a locked rocket homes on
 // him (guideRocket). The lock rides out a short slip off target (keep cone, grace), and drops when the target dies or
 // leaves, goes out of range or out of sight, or you stop aiming, die or change role (a new footState has no lock).
-const FLOCK = { cone: 0.06, keep: 0.13, time: 0.7, grace: 0.4, scan: 0.1, min: 15, turn: 2.6 };
+const FLOCK = { cone: 0.06, keep: 0.13, time: 0.7, grace: 0.4, scan: 0.1, min: 15, turn: 2.6,
+  // SAS-5 (r6): ships and aircraft. The 320 m launcher range and the 3.4 s, ~100 m/s rocket could not reach either (enemy ships
+  // fight 1-2 km out, aircraft pass fast and high), so a lock on them reaches further and the homing rocket flies longer; against
+  // aircraft its motor sustains it to a speed that can run a fighter down, and the seeker takes a wider cone to pick one up.
+  ship: { range: 900, life: 11, turn: 2.6, vmax: 1.15 }, air: { range: 700, life: 8, turn: 3.4, vmax: 2.5, cone: 0.1 } };
+const footLockK = e => e && e.type ? (e.type.ship ? FLOCK.ship : e.type.air ? FLOCK.air : null) : null; // per-class lock rules (null: the launcher's own)
 const footLockC = e => e.type ? center(e) : [e.p[0], e.p[1] + (e.crouch > 0.5 ? 0.7 : 1.1), e.p[2]]; // vehicle centre, or a soldier's chest
 function footLockOk(p, e, from, aim, cone, range) {
   if (!e || e.team === p.team) return false;
+  const K = footLockK(e); if (K) range = Math.max(range, K.range);
   if (e.type ? (!e.alive || e.gone || e === p) : (e.dead || e.pl || e.st === "gone" || e.st === "boat")) return false;
+  if (e.type && e.type.ship && e.sh && e.sh.depth > 4) return false; // a submerged submarine shows no target
   const c = footLockC(e), dx = c[0] - from[0], dy = c[1] - from[1], dz = c[2] - from[2], d = Math.hypot(dx, dy, dz);
   if (d < FLOCK.min || d > range || (aim[0] * dx + aim[1] * dy + aim[2] * dz) / d < Math.cos(cone)) return false;
-  return los(from, c) || (!!e.type && !e.type.air && !!e.TM && los(from, tp(e.TM, [0, e.type.tur.h * 0.7, 0])));
+  if (los(from, c)) return true;
+  if (!e.type || e.type.air) return false;
+  if (e.type.ship) return los(from, vadd(e.pos, vscale(e.Y, e.type.hullTop + (e.type.mastH || 10) * 0.35))); // the superstructure over a crest
+  return !!e.TM && !!e.type.tur && los(from, tp(e.TM, [0, e.type.tur.h * 0.7, 0]));
 }
 const footLocked = f => !!(f && f.lock && f.lockT >= FLOCK.time && f.lockLost <= 0);
 function footLockStep(p, f, dt) {
@@ -14149,9 +14161,10 @@ function footLockStep(p, f, dt) {
   }
   f.lockScan = (f.lockScan || 0) - dt;
   if (!f.lock && f.lockScan <= 0) {
-    f.lockScan = FLOCK.scan; let best = null, bc = Math.cos(FLOCK.cone);
+    f.lockScan = FLOCK.scan; let best = null, bk = -2;
     const test = e => { const c = footLockC(e), dx = c[0] - from[0], dy = c[1] - from[1], dz = c[2] - from[2], d = Math.hypot(dx, dy, dz) || 1, k = (aim[0] * dx + aim[1] * dy + aim[2] * dz) / d;
-      if (k > bc && footLockOk(p, e, from, aim, FLOCK.cone, W.range)) { bc = k; best = e; } };
+      const cone = (footLockK(e) || FLOCK).cone || FLOCK.cone; // the closest to the crosshair, each class within its own cone
+      if (k > Math.cos(cone) && k > bk && footLockOk(p, e, from, aim, cone, W.range)) { bk = k; best = e; } };
     for (const e of tanks) if (e.alive && e.team !== p.team) test(e);
     for (const e of INF) if (!e.dead && !e.pl && e.team !== p.team) test(e);
     if (best) { f.lock = best; f.lockT = 0; f.lockLost = 0; }
@@ -14194,7 +14207,8 @@ function footFire(p) {
   if (W.rocket) { // the infantry teams' rocket (IFC.at), fired at the crosshair
     const A = W.rk || IFC.at, src = cam.pos, d0 = vnorm(vsub(cam.aim, mz)), e = f.spread, d = vnorm(vadd(d0, [rand(-e, e), rand(-e, e) * 0.6, rand(-e, e)]));
     const lk = W.lock && footLocked(f) ? f.lock : null; // SAS-5: a locked M9A1 rocket homes (guideRocket); unlocked it flies as aimed
-    shells.push({ kind: "rocket", p: vadd(mz, vscale(d, 0.4)), v: vscale(d, A.v), owner: p, pen: A.pen, he: A.he, life: 3.4, start: mz.slice(), ...(lk ? { guided: true, target: lk, turn: FLOCK.turn, vmax: A.v * 1.15 } : {}) });
+    const K = footLockK(lk); // SAS-5 (r6): a ship or aircraft lock flies further (and, at aircraft, faster)
+    shells.push({ kind: "rocket", p: vadd(mz, vscale(d, 0.4)), v: vscale(d, A.v), owner: p, pen: A.pen, he: A.he, life: K ? K.life : 3.4, start: mz.slice(), deck: f.deck && f.deck.ship || null, ...(lk ? { guided: true, target: lk, turn: K ? K.turn : FLOCK.turn, vmax: A.v * (K ? K.vmax : 1.15) } : {}) });
     if (W.lock) centerMsg(lk ? `ROCKET AWAY · homing on ${lk.type ? lk.name : "an enemy soldier"}` : "ROCKET AWAY · no lock, flying as aimed", lk ? "#ff8a6e" : "#ffd479", 2);
     // back-blast out of the open breech (SAS-5: from the rear of the tube, not 1.6 m behind the muzzle, which was inside the
     // third-person camera: 8 overlapping full-screen puffs on every shot); a short hot flash, then the dust it raises
