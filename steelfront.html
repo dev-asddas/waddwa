@@ -13132,7 +13132,7 @@ function sbHud() {
 // Drawing: a jointed rig (pelvis, spine, head, two-bone IK arms and legs, boots planted on the terrain) built once from
 // boxes and cylinders, ~25 small draws for the one player soldier. AI soldiers keep their lightweight instanced boxes.
 const FOOT_WPN = {
-  rifle:   { name: "M1 rifle", mag: 8, res: 56, rof: 0.2, semi: true, hip: 0.03, ads: 0.0025, move: 0.022, rel: 2.3, range: 450, kick: 0.5, fov: 0.78, snd: 3000, vol: 0.2 },
+  rifle:   { name: "M1 rifle", ping: true, mag: 8, res: 56, rof: 0.2, semi: true, hip: 0.03, ads: 0.0025, move: 0.022, rel: 2.3, range: 450, kick: 0.5, fov: 0.78, snd: 3000, vol: 0.2 },
   smg:     { name: "M1A1 SMG", mag: 30, res: 150, rof: 0.085, hip: 0.045, ads: 0.014, move: 0.02, rel: 2.6, range: 160, kick: 0.22, fov: 0.92, snd: 2600, vol: 0.16 },
   carbine: { name: "M1 carbine", mag: 15, res: 90, rof: 0.15, semi: true, hip: 0.035, ads: 0.006, move: 0.02, rel: 2.1, range: 300, kick: 0.32, fov: 0.85, snd: 3200, vol: 0.16 },
   lmg:     { name: "M1918 BAR", mag: 20, res: 160, rof: 0.12, hip: 0.07, ads: 0.016, move: 0.03, rel: 3.4, range: 500, kick: 0.42, fov: 0.85, bipod: 0.35, snd: 2200, vol: 0.22, mg: true },
@@ -13421,6 +13421,10 @@ function buildFootMeshes(de = false) {
       fBox(b, -0.024, 0.04, 0.12, 0.01, 0.014, 0.05, C.steelL); fBox(b, -0.03, 0.04, 0.095, 0.012, 0.016, 0.014, C.steelL); // op rod and its handle (right side)
       fBox(b, 0, -0.018, 0.33, 0.016, 0.012, 0.016, C.steelL); fBox(b, 0, -0.09, -0.3, 0.016, 0.012, 0.016, C.steelL); }); // sling swivels
     tguard(b); sling(b, [-0.022, -0.02, 0.33], [-0.022, -0.09, -0.3], 0.05);
+    steel(() => { sTubeZ(b, [[0.415, 0.021, 0.02, 0, 0.012], [0.43, 0.021, 0.02, 0, 0.012]], C.steelL, 10, 2); // lower band round the fore-end
+      sTubeZ(b, [[0.69, 0.015, 0.015, 0, 0.028], [0.722, 0.012, 0.012, 0, 0.028]], C.steelL, 8, 2); fBox(b, 0, 0.012, 0.67, 0.008, 0.012, 0.03, C.steel); // gas cylinder lock screw, bayonet lug
+      fBox(b, 0.021, 0.036, 0.015, 0.006, 0.012, 0.02, C.steelL); fBox(b, 0, -0.026, 0.055, 0.008, 0.006, 0.012, C.steelL); // clip latch (left), safety in the guard
+      fBox(b, 0, 0.052, 0.02, 0.026, 0.006, 0.05, C.steelL); }); // receiver bridge over the clip well // SAS-5 detail
   });
   W.carbine = footMesh(b => { // M1 carbine: short, light, the 15-round box magazine in front of the trigger
     wood(() => sProfile(b, [[-0.33, 0.03], [-0.15, 0.026], [-0.05, 0.02], [-0.02, 0.012], [0.0, 0.016], [0.3, 0.017], [0.31, 0.003], [0.3, -0.012], [0.09, -0.014], [0.06, -0.022], [0.005, -0.026], [-0.03, -0.045], [-0.09, -0.052], [-0.33, -0.078], [-0.338, -0.024]], -0.019, 0.019, C.wood));
@@ -13429,6 +13433,9 @@ function buildFootMeshes(de = false) {
       sTubeZ(b, [[0.15, 0.009, 0.009, 0, 0.036], [0.57, 0.008, 0.008, 0, 0.036]], C.steel, 8); fBox(b, 0, 0.054, 0.555, 0.004, 0.022, 0.008, C.steel); sTubeZ(b, [[0.27, 0.014, 0.014, 0, 0.028], [0.3, 0.014, 0.014, 0, 0.028]], C.steelL, 8);
       fBox(b, -0.022, 0.034, 0.1, 0.01, 0.012, 0.04, C.steelL); });
     tguard(b, 0.0); sling(b, [0.02, -0.015, 0.27], [0.02, -0.07, -0.25], 0.035);
+    steel(() => { for (const sx of [-1, 1]) fBox(b, sx * 0.008, 0.054, 0.555, 0.003, 0.02, 0.012, C.steel); // front sight ears
+      fBox(b, 0, 0.066, -0.012, 0.012, 0.008, 0.012, C.steelL); fBox(b, -0.02, 0.012, 0.03, 0.006, 0.01, 0.012, C.steelL); fBox(b, 0.02, 0.012, 0.03, 0.006, 0.01, 0.012, C.steelL); // L-type flip sight, magazine release, safety
+      fBox(b, 0, -0.02, 0.29, 0.03, 0.024, 0.012, C.steelL); sProfile(b, [[-0.343, 0.032], [-0.335, 0.032], [-0.335, -0.078], [-0.343, -0.08]], -0.02, 0.02, C.steelL); }); // barrel band with the sling slot, butt plate // SAS-5 detail
   });
   W.smg = footMesh(b => { // M1A1 submachine gun: buttstock, pistol grip, a square receiver, the horizontal fore-grip
     wood(() => { sProfile(b, [[-0.34, 0.03], [-0.07, 0.018], [-0.05, 0.002], [-0.07, -0.025], [-0.34, -0.085], [-0.345, -0.03]], -0.019, 0.019, C.wood);
@@ -13438,6 +13445,10 @@ function buildFootMeshes(de = false) {
       sTubeZ(b, [[0.22, 0.012, 0.012, 0, 0.04], [0.46, 0.011, 0.011, 0, 0.04]], C.steel, 8); fBox(b, 0, 0.068, 0.0, 0.016, 0.016, 0.03, C.steel); fBox(b, 0, 0.064, 0.44, 0.004, 0.02, 0.008, C.steel);
       fBox(b, 0.03, 0.045, 0.09, 0.014, 0.014, 0.024, C.steelL); fBox(b, 0, -0.055, 0.12, 0.012, 0.012, 0.012, C.steelL); });
     tguard(b, 0.02);
+    steel(() => { for (const sx of [-1, 1]) fBox(b, sx * 0.01, 0.07, -0.02, 0.004, 0.018, 0.022, C.steel); // protective ears round the peep sight
+      fBox(b, 0.027, 0.035, 0.0, 0.004, 0.014, 0.016, C.steelL); fBox(b, 0.027, 0.03, 0.035, 0.004, 0.014, 0.016, C.steelL); // selector and safety levers (left)
+      fBox(b, -0.027, 0.03, 0.06, 0.004, 0.016, 0.06, C.steelL); fBox(b, 0, 0.0, 0.11, 0.05, 0.02, 0.05, C.steel); // ejection port (right), magazine well
+      sProfile(b, [[-0.352, 0.032], [-0.344, 0.032], [-0.344, -0.085], [-0.352, -0.087]], -0.02, 0.02, C.steelL); fBox(b, 0, -0.05, -0.25, 0.012, 0.01, 0.014, C.steelL); }); // butt plate, sling swivel // SAS-5 detail
   });
   W.lmg = footMesh(b => { // M1918A2 BAR: long receiver, wooden fore-end, gas tube, flash hider, carrying handle
     wood(() => sProfile(b, [[-0.42, 0.04], [-0.24, 0.03], [-0.06, 0.024], [-0.03, 0.012], [-0.02, -0.02], [-0.04, -0.05], [-0.1, -0.066], [-0.42, -0.1], [-0.43, -0.03]], -0.023, 0.023, C.wood));
@@ -13446,6 +13457,10 @@ function buildFootMeshes(de = false) {
       sTubeZ(b, [[0.3, 0.014, 0.014, 0, 0.045], [0.9, 0.012, 0.012, 0, 0.045]], C.steel, 8); sTubeZ(b, [[0.88, 0.019, 0.019, 0, 0.045], [0.97, 0.019, 0.019, 0, 0.045]], C.steelL, 8); sTubeZ(b, [[0.3, 0.012, 0.012, 0, 0.01], [0.7, 0.012, 0.012, 0, 0.01]], C.steel, 8);
       fBox(b, 0, 0.082, 0.02, 0.022, 0.03, 0.03, C.steel); fBox(b, 0, 0.068, 0.93, 0.004, 0.03, 0.01, C.steel); fBox(b, 0, 0.09, 0.22, 0.012, 0.012, 0.1, C.steelL); fBox(b, 0, 0.077, 0.18, 0.012, 0.03, 0.012, C.steelL); fBox(b, 0, 0.077, 0.26, 0.012, 0.03, 0.012, C.steelL); });
     tguard(b, 0.03); sling(b, [-0.026, 0.0, 0.5], [-0.026, -0.09, -0.34], 0.06);
+    steel(() => { for (const sx of [-1, 1]) fBox(b, sx * 0.01, 0.068, 0.93, 0.003, 0.034, 0.02, C.steel); // hooded front sight
+      fBox(b, 0, 0.09, -0.01, 0.026, 0.018, 0.012, C.steelL); fBox(b, 0.028, 0.03, 0.02, 0.004, 0.02, 0.024, C.steelL); // folding rear sight leaf, selector lever (left)
+      fBox(b, -0.028, 0.04, 0.12, 0.004, 0.018, 0.07, C.steelL); fBox(b, 0, -0.03, 0.1, 0.03, 0.008, 0.012, C.steelL); // ejection port (right), magazine release
+      sTubeZ(b, [[0.69, 0.018, 0.018, 0, 0.01], [0.72, 0.018, 0.018, 0, 0.01]], C.steelL, 8, 2); }); // gas cylinder regulator // SAS-5 detail
   });
   // pass 41: the folded bipod, legs closed and lying back under the barrel from the mount (the deployed mesh rotated by
   // rotX(-1.53) swung its splayed legs 20 cm past the muzzle, and showed whenever the gun was not braced)
@@ -13465,6 +13480,9 @@ function buildFootMeshes(de = false) {
       sProfile(b, [[-0.36, 0.062], [-0.12, 0.066], [-0.12, 0.05], [-0.36, 0.02]], -0.026, 0.026, C.wood); }); // grips, shoulder stock
     steel(() => { fBox(b, 0.055, 0.145, 0.12, 0.012, 0.05, 0.03, C.steel); fBox(b, 0.055, 0.15, 0.45, 0.012, 0.06, 0.012, C.steel); fBox(b, 0, 0.068, 0.06, 0.03, 0.03, 0.08, C.steel); fBox(b, -0.045, 0.1, -0.1, 0.03, 0.05, 0.1, [0.25, 0.26, 0.2]); }); // sights (left), trigger housing, battery box
     sling(b, [0.04, 0.1, 0.45], [0.04, 0.1, -0.55], 0.09);
+    steel(() => { fBox(b, 0, 0.142, -0.68, 0.02, 0.016, 0.05, C.steel); fBox(b, 0.012, 0.148, -0.66, 0.006, 0.012, 0.012, C.steelL); // rear latch and its contact spring
+      fBox(b, 0.03, 0.124, -0.25, 0.004, 0.004, 0.62, [0.12, 0.12, 0.1]); // the firing wire from the batteries to the contact
+      for (const sx of [-1, 1]) fBox(b, 0.055 + sx * 0.008, 0.18, 0.45, 0.003, 0.012, 0.012, C.steel); }); // front sight frame posts // SAS-5 detail
   });
   W.rkt = footMesh(b => { // SAS-5 M9A1 bazooka: two tube halves joined by a coupling collar, reflex sight on the left, magneto trigger, skeleton stock
     paint(() => { sTubeZ(b, [[-0.78, 0.031, 0.031, 0, 0.1], [-0.02, 0.031, 0.031, 0, 0.1]], C.tube, 14, 2); sTubeZ(b, [[0.06, 0.031, 0.031, 0, 0.1], [0.78, 0.031, 0.031, 0, 0.1]], C.tube, 14, 2);
@@ -13486,6 +13504,8 @@ function buildFootMeshes(de = false) {
       sTubeZ(b, [[0.05, 0.017, 0.017, 0, 0.098], [0.07, 0.017, 0.017, 0, 0.098]], C.steelL, 10, 2); sTube(b, [[0.11, 0.01, 0.01, 0, 0.05], [0.12, 0.01, 0.01, 0, 0.05]], C.steelL, 8); // turrets
       for (const z of [-0.03, 0.14]) fBox(b, 0, 0.068, z, 0.022, 0.04, 0.02, C.steel); // rings
       sStrap(b, [-0.016, 0.04, -0.01], [-0.06, 0.02, -0.02], 0.01, 0.01, C.steelL); sBlob(b, [-0.064, 0.018, -0.02], 0.012, 0.012, 0.012, C.steelL, 8, 4); }); // bolt handle (right side is -X)
+    steel(() => { sTubeZ(b, [[0.3, 0.021, 0.022, 0, 0.032], [0.315, 0.021, 0.022, 0, 0.032]], C.steelL, 10, 2); sTubeZ(b, [[0.5, 0.02, 0.021, 0, 0.032], [0.515, 0.02, 0.021, 0, 0.032]], C.steelL, 10, 2); // upper and lower bands
+      fBox(b, 0, -0.03, 0.06, 0.024, 0.006, 0.08, C.steelL); fBox(b, 0, 0.04, -0.06, 0.014, 0.012, 0.03, C.steelL); fBox(b, -0.012, 0.075, -0.07, 0.004, 0.012, 0.012, C.steelL); }); // magazine floor plate, cocking piece, safety // SAS-5 detail
     tguard(b); sling(b, [-0.022, -0.016, 0.42], [-0.022, -0.085, -0.3], 0.05);
   });
   // German weapons (the AI's kit): Kar98k, MP40, MG42, Panzerschreck
@@ -13496,12 +13516,18 @@ function buildFootMeshes(de = false) {
       fBox(b, 0, 0.06, 0.2, 0.02, 0.016, 0.06, C.steel); fBox(b, 0, 0.06, 0.73, 0.012, 0.024, 0.016, C.steel); // tangent rear sight, hooded front sight
       sStrap(b, [-0.016, 0.04, -0.01], [-0.045, 0.0, -0.02], 0.01, 0.01, C.steelL); sBlob(b, [-0.048, -0.004, -0.02], 0.013, 0.013, 0.013, C.steelL, 8, 4); });
     tguard(b); sling(b, [0.022, -0.016, 0.42], [0.022, -0.08, -0.3], 0.05);
+    steel(() => { sTubeZ(b, [[0.74, 0.004, 0.004, 0, 0.012], [0.77, 0.004, 0.004, 0, 0.012]], C.steelL, 6); fBox(b, 0, 0.012, 0.7, 0.012, 0.012, 0.05, C.steel); // cleaning rod tip, bayonet lug
+      sProfile(b, [[-0.412, 0.034], [-0.402, 0.034], [-0.402, -0.088], [-0.412, -0.09]], -0.021, 0.021, C.steelL); fBox(b, -0.021, -0.02, -0.2, 0.004, 0.024, 0.024, C.steelL); // butt plate, stock disc (right)
+      fBox(b, 0, 0.052, -0.06, 0.006, 0.02, 0.012, C.steelL); fBox(b, 0, -0.03, 0.06, 0.022, 0.006, 0.08, C.steelL); }); // wing safety on the bolt shroud, floor plate // SAS-5 detail
   });
   W.mp40 = footMesh(b => { // MP40: folded-out steel stock, bakelite grip frame, the long straight magazine (separate)
     steel(() => { for (const s of [-1, 1]) sStrap(b, [s * 0.018, 0.035, -0.06], [s * 0.018, 0.0, -0.33], 0.008, 0.012, C.steel); fBox(b, 0, -0.01, -0.33, 0.05, 0.09, 0.012, C.steel);
       sTubeZ(b, [[-0.07, 0.019, 0.019, 0, 0.04], [0.2, 0.019, 0.019, 0, 0.04]], C.steel, 12, 2); sTubeZ(b, [[0.2, 0.01, 0.01, 0, 0.034], [0.4, 0.01, 0.01, 0, 0.034]], C.steel, 8);
       fBox(b, 0, 0.02, 0.37, 0.012, 0.03, 0.02, C.steel); fBox(b, 0, 0.066, 0.36, 0.006, 0.02, 0.01, C.steel); fBox(b, 0.022, 0.04, 0.02, 0.012, 0.012, 0.03, C.steelL); });
     withMat(MAT.rubber, () => sProfile(b, [[-0.05, 0.02], [0.13, 0.02], [0.13, -0.01], [0.03, -0.012], [0.01, -0.1], [-0.035, -0.1], [-0.03, -0.01], [-0.05, -0.01]], -0.016, 0.016, [0.24, 0.13, 0.08]));
+    steel(() => { fBox(b, 0.026, 0.04, 0.06, 0.012, 0.01, 0.012, C.steelL); fBox(b, 0.02, 0.04, 0.04, 0.004, 0.006, 0.1, C.steel); // cocking knob in its slot (left)
+      fBox(b, 0, 0.012, 0.1, 0.04, 0.028, 0.05, C.steel); fBox(b, 0, 0.012, 0.32, 0.028, 0.012, 0.03, C.steel); // magazine housing, the resting bar under the barrel
+      sTubeZ(b, [[0.39, 0.013, 0.013, 0, 0.034], [0.41, 0.013, 0.013, 0, 0.034]], C.steelL, 8, 2); for (const sx of [-1, 1]) fBox(b, sx * 0.009, 0.066, 0.36, 0.003, 0.02, 0.014, C.steel); fBox(b, 0, 0.064, -0.05, 0.016, 0.012, 0.012, C.steel); }); // muzzle nut, front sight hood, flip rear sight // SAS-5 detail
   });
   W.mg42 = footMesh(b => { // MG42: the perforated barrel jacket, the angular receiver, a slim butt and bipod
     withMat(MAT.rubber, () => sProfile(b, [[-0.4, 0.03], [-0.08, 0.03], [-0.03, 0.0], [-0.08, -0.03], [-0.4, -0.08], [-0.41, -0.02]], -0.022, 0.022, [0.18, 0.12, 0.08]));
@@ -13510,12 +13536,18 @@ function buildFootMeshes(de = false) {
       sTubeZ(b, [[0.82, 0.02, 0.02, 0, 0.04], [0.9, 0.028, 0.028, 0, 0.04]], C.steel, 10, 2); fBox(b, 0, 0.088, 0.04, 0.02, 0.04, 0.03, C.steel); fBox(b, 0, 0.085, 0.8, 0.006, 0.03, 0.012, C.steel); });
     withMat(MAT.rubber, () => sProfile(b, [[-0.03, 0.0], [0.02, 0.0], [0.0, -0.1], [-0.045, -0.1]], -0.016, 0.016, [0.18, 0.12, 0.08]));
     tguard(b, 0.0);
+    steel(() => { fBox(b, 0, 0.072, 0.13, 0.064, 0.008, 0.2, C.steelL); fBox(b, 0, 0.08, -0.06, 0.03, 0.016, 0.016, C.steel); // feed cover, its latch
+      fBox(b, -0.032, 0.05, 0.36, 0.008, 0.03, 0.05, C.steelL); fBox(b, 0.034, 0.075, 0.5, 0.008, 0.008, 0.12, C.steel); fBox(b, 0.034, 0.06, 0.45, 0.008, 0.03, 0.008, C.steel); fBox(b, 0.034, 0.06, 0.55, 0.008, 0.03, 0.008, C.steel); // barrel-change latch (right), carrying handle (left)
+      sTubeZ(b, [[0.9, 0.028, 0.028, 0, 0.04], [0.93, 0.02, 0.02, 0, 0.04]], C.steel, 10, 2); fBox(b, 0, 0.11, 0.06, 0.02, 0.03, 0.006, C.steelL); }); // muzzle booster cone, folding rear sight // SAS-5 detail
   });
   W.pschreck = footMesh(b => { // RPzB 54 Panzerschreck: the longer tube, the blast shield with its window
     paint(() => { sTubeZ(b, [[-0.8, 0.046, 0.046, 0, 0.1], [0.82, 0.046, 0.046, 0, 0.1]], C.tube, 14, 2); sTubeZ(b, [[-0.84, 0.054, 0.054, 0, 0.1], [-0.8, 0.054, 0.054, 0, 0.1]], C.steel, 14, 2);
       fBox(b, 0.08, 0.15, 0.42, 0.24, 0.22, 0.008, [0.36, 0.39, 0.32]); fBox(b, 0.06, 0.185, 0.415, 0.075, 0.045, 0.006, [0.3, 0.38, 0.42]); }); // blast shield left of the tube, ahead of the face; pass 38: 24 x 22 cm (was 30 x 28, read as oversized), window on the sight line
     wood(() => sProfile(b, [[-0.03, 0.06], [0.03, 0.06], [0.015, -0.01], [-0.005, -0.06], [-0.04, -0.06], [-0.03, -0.01]], -0.017, 0.017, C.wood));
     steel(() => { fBox(b, 0, 0.065, 0.32, 0.02, 0.06, 0.03, C.steel); fBox(b, 0.06, 0.16, 0.0, 0.012, 0.06, 0.012, C.steel); sStrap(b, [0, 0.06, -0.2], [0, 0.0, -0.3], 0.03, 0.01, C.steel); });
+    steel(() => { sTubeZ(b, [[-0.86, 0.068, 0.068, 0, 0.1], [-0.85, 0.068, 0.068, 0, 0.1]], C.steel, 14, 2, false); for (let i = 0; i < 4; i++) { const a = i / 4 * Math.PI * 2 + 0.78; sStrap(b, [Math.cos(a) * 0.05, 0.1 + Math.sin(a) * 0.05, -0.8], [Math.cos(a) * 0.068, 0.1 + Math.sin(a) * 0.068, -0.855], 0.004, 0.004, C.steel); } // rear guard ring on its stays
+      fBox(b, 0, 0.12, -0.78, 0.024, 0.02, 0.05, C.steel); fBox(b, 0.06, 0.17, 0.62, 0.012, 0.05, 0.012, C.steel); // the rear latch / igniter plug, front sight frame
+      fBox(b, 0, 0.04, 0.05, 0.03, 0.04, 0.08, C.steel); fBox(b, 0, 0.06, -0.3, 0.06, 0.03, 0.02, C.steelL); }); // magneto trigger housing, shoulder rest // SAS-5 detail
   });
   W.magRifle = footMesh(b => steel(() => { fBox(b, 0, 0, 0, 0.03, 0.035, 0.05, C.brass); for (let i = 0; i < 4; i++) sTube(b, [[0.017, 0.005, 0.005, 0, -0.018 + i * 0.012], [0.022, 0.002, 0.002, 0, -0.018 + i * 0.012]], C.brass, 6); }));
   W.magBox = footMesh(b => steel(() => sProfile(b, [[-0.02, 0], [0.025, 0], [0.03, -0.14], [-0.015, -0.14]], -0.013, 0.013, C.steel)));
@@ -14047,7 +14079,8 @@ function footThrow(p) {
 }
 function footFire(p) {
   const f = p.F, W = p.type.Wp, R = f.rig;
-  f.mag--; f.fireCd = W.rof; f.fireHold = 1.4; f.kick = Math.min(1.4, f.kick + W.kick * 0.9); f.flashT = 0.05; camKick(W.kick * 0.35);
+  f.mag--; f.fireCd = W.rof; f.fireHold = 1.4;
+  if (W.ping && f.mag === 0 && AC && AC.state === "running") setTimeout(() => { if (AC.state === "running") noiseHit(0.05, 5200, 3800, 0.09); }, 90); // SAS-5: the Garand's empty en-bloc clip ejects with its ping f.kick = Math.min(1.4, f.kick + W.kick * 0.9); f.flashT = 0.05; camKick(W.kick * 0.35);
   if (W.bolt) f.boltT = W.rof;
   cam.pitch = clamp(cam.pitch + W.kick * 0.012 * (1 - f.bipS * 0.6), -1.35, 1.35); cam.yaw = wrapA(cam.yaw + (Math.random() - 0.5) * W.kick * 0.008);
   const mz = R ? tp(R.WM, W_PTS[p.type.R.wpn].muzzle) : vadd(p.pos, [0, 1.5, 0]);
