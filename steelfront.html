@@ -10167,16 +10167,20 @@ function infNearPick(dt) {
   const nN = INF_NEAR_N(), nM = INF_MID_N();
   for (const [, s, d, was] of L) {
     if (INF_NEAR.length < nN && d < R + (was === 1 ? 4 : 0)) { infNearAnim(s, dt); s.nearF = frameId; INF_NEAR.push(s); }
-    else if (INF_MID.length < nM && d < RM + (was ? 8 : 0)) { infNearAnim(s, dt); s.midF = frameId; INF_MID.push(s); }
+    else if (INF_MID.length < nM && d < RM + (was ? 8 : 0)) { // SAS-5: 30-100 m out the rig is solved every other frame (half the soldiers each frame), with the time since
+      s.midAcc = (s.midAcc || 0) + dt; if (was !== 2 || !s.rig || !s.rig.rigR || ((frameId ^ (s.ang * 1e3)) & 1)) { infNearAnim(s, s.midAcc); s.midAcc = 0; }
+      s.midF = frameId; INF_MID.push(s); }
   }
 }
 // the middle band: every part of every soldier gathered by mesh, then one instanced draw per mesh (main and shadow pass)
-function drawInfantryMid() {
-  if (!INF_MID.length) return;
+// SAS-5: and the detailed (near) band with it: the same part meshes, so one instanced draw per mesh now covers every
+// AI soldier in both bands (it was ~18 separate draws per near soldier, each with its own uniform uploads, per pass)
+function infBatch(list) {
   const by = new Map(), sink = (mesh, M, tint, emis) => { let a = by.get(mesh); if (!a) by.set(mesh, a = []); a.push(M, tint, emis); };
-  for (const s of INF_MID) if (s.rig && s.rig.rigR) footDrawRig(s.rig, s.rig.F, s.rig.rigR, false, sink);
+  for (const s of list) if (s.rig && s.rig.rigR) footDrawRig(s.rig, s.rig.F, s.rig.rigR, false, sink);
   for (const [mesh, a] of by) { for (let i = 0; i < a.length; i += 3) pushInst(a[i], a[i + 1][0], a[i + 1][1], a[i + 1][2], a[i + 2], 1); flushInst(mesh); }
 }
+function drawInfantryMid() { if (INF_NEAR.length || INF_MID.length) infBatch(INF_NEAR.length ? INF_NEAR.concat(INF_MID) : INF_MID); }
 function infNearAnim(s, dt) {
   let q = s.rig;
   if (!q) { const kind = s.at ? "at" : s.mg ? "mg" : ((s.ang * 7.3) % 1) < 0.28 ? "smg" : "rifle", role = { at: "at", mg: "mg", smg: "assault", rifle: "rifle" }[kind];
@@ -10206,7 +10210,9 @@ function infNearAnim(s, dt) {
 }
 // SAS-5: in the shadow pass only the soldiers within 18 m (their contact shadow is what reads; past that a rig's shadow
 // is a few texels of the shadow map, but each one still cost ~18 draws and ~5k triangles a second time per frame)
-function drawInfantryNear() { const cx = cam.pos[0], cz = cam.pos[2]; for (const s of INF_NEAR) if (s.rig && s.rig.rigR && (!shadowPass || (s.p[0] - cx) ** 2 + (s.p[2] - cz) ** 2 < 324)) footDrawRig(s.rig, s.rig.F, s.rig.rigR, false); }
+function drawInfantryNear() { // main pass: drawn with the middle band (drawInfantryMid); shadow pass: the ones within 18 m, instanced
+  if (!shadowPass || !INF_NEAR.length) return; const cx = cam.pos[0], cz = cam.pos[2], L = INF_NEAR.filter(s => (s.p[0] - cx) ** 2 + (s.p[2] - cz) ** 2 < 324); if (!L.length) return;
+  const prev = cur; use(depthProgI); infBatch(L); if (prev) use(prev); }
 // pass 51: the far figure (past the detailed and middle bands) is built to the detailed rig's measurements and kit, so
 // the hand-over reads as a change of detail, not of soldier: the rig's heights (hips 0.94 m, shoulders 1.53 m, head
 // 1.67 m; kneeling hips 0.53 m), its chest turned 0.36 rad (0.52 aimed) right of the aim, the low-ready carry and the
@@ -10524,7 +10530,8 @@ function coverBlast(p, he, owner) {
     if (d < he.R && Math.abs(p[1] - c.mx[1]) < he.R) damageCover(c, he.dmg * 1.4 * (1 - d / he.R), p, owner);
   }
 }
-function drawCovers(F) {
+function drawCovers(F) { drawBatched(() => drawCovers0(F)); }
+function drawCovers0(F) {
   covers.forEach((c, k) => {
     if (F && !sphereVisible(F, c.x, c.y0 + 1, c.z, 6)) return;
     const base = COVER_COL[c.kind] || COVER_COL.stone, dk = c.state ? 0.72 : 1, col = base.map(v => v * dk);
@@ -11534,12 +11541,12 @@ function fireGuided(t, R) {
 }
 // steer a guided rocket toward where its target will be, turning at most s.turn rad/s
 function guideRocket(s, dt) {
-  const e = s.target;
-  if (!e || !e.alive) { s.v[1] -= G * dt * 0.25; return; }
-  const c = center(e), sp = vlen(s.v), dist = vlen(vsub(c, s.p)), tgo = dist / Math.max(sp, 1);
+  const e = s.target, inf = !!e && !e.type; // SAS-5: or a soldier (the Rocket trooper's lock): his chest, no loft, no lead
+  if (!e || (inf ? e.dead || e.st === "gone" : !e.alive)) { s.v[1] -= G * dt * 0.25; return; }
+  const c = inf ? footLockC(e) : center(e), sp = vlen(s.v), dist = vlen(vsub(c, s.p)), tgo = dist / Math.max(sp, 1);
   // against tanks the rocket flies a shallow loft (aim point raised up to 8 m, less as it closes) to clear crests
-  const loft = e.type.air ? 0 : clamp((dist - 40) * 0.03, 0, 8);
-  const want = vnorm(vsub(vadd(c, vadd(vscale(unitVel(e), tgo), [0, loft, 0])), s.p)), cur = vscale(s.v, 1 / sp);
+  const loft = inf || e.type.air ? 0 : clamp((dist - 40) * (s.owner && s.owner.type && s.owner.type.foot ? 0.012 : 0.03), 0, 8);
+  const want = vnorm(vsub(vadd(c, vadd(inf ? [0, 0, 0] : vscale(unitVel(e), tgo), [0, loft, 0])), s.p)), cur = vscale(s.v, 1 / sp);
   const ang = Math.acos(clamp(vdot(cur, want), -1, 1)), max = s.turn * dt;
   const nd = ang <= max ? want : vnorm(vadd(vscale(cur, Math.sin(ang - max)), vscale(want, Math.sin(max))));
   s.v = vscale(nd, Math.min(s.vmax, sp + 150 * dt));
@@ -13139,7 +13146,7 @@ const FOOT_WPN = {
   at:      { name: "M1 bazooka", mag: 1, res: 5, rof: 0.6, semi: true, hip: 0.03, ads: 0.006, move: 0.02, rel: 3.4, range: 220, kick: 1.1, fov: 0.75, rocket: true },
   // SAS-5: the M9A1, the two-piece bazooka that replaced the M1A1 (reflex sight, magneto trigger, no batteries). It fires
   // HE rockets here: a wider blast for dug-in infantry, MG nests and soft vehicles, less penetration than the AT team's HEAT
-  rkt:     { name: "M9A1 bazooka (HE)", mag: 1, res: 7, rof: 0.6, semi: true, hip: 0.028, ads: 0.004, move: 0.02, rel: 2.9, range: 320, kick: 1.0, fov: 0.62, rocket: true,
+  rkt:     { name: "M9A1 bazooka (HE)", lock: true, mag: 1, res: 7, rof: 0.6, semi: true, hip: 0.028, ads: 0.004, move: 0.02, rel: 2.9, range: 320, kick: 1.0, fov: 0.62, rocket: true,
              rk: { v: 92, pen: 60, he: { R: 6, kill: 0.75, dmg: 34 } } },
   sniper:  { name: "M1903A4 scoped rifle", mag: 5, res: 35, rof: 1.25, semi: true, bolt: true, hip: 0.06, ads: 0.0006, move: 0.05, rel: 3.2, range: 900, kick: 0.9, fov: 0.26, scope: true, snd: 3400, vol: 0.24 },
 };
@@ -13148,7 +13155,7 @@ const FOOT_ROLES = [
   { key: "assault", name: "Assault", wpn: "smg", nade: 4, spd: 1.08, hp: 100, d: "Submachine gun, 30-round magazines, 4 grenades. Fastest on foot." },
   { key: "mg", name: "Machine gunner", wpn: "lmg", nade: 1, spd: 0.86, hp: 115, d: "Automatic rifle, 20-round magazines. Crouch to brace it (bipod): far tighter spread." },
   { key: "at", name: "Anti-tank", wpn: "at", nade: 1, spd: 0.92, hp: 100, d: "Bazooka: rockets with the infantry teams' penetration (95 mm). 1 loaded, 5 spare." },
-  { key: "rocket", name: "Rocket trooper", wpn: "rkt", nade: 1, spd: 0.94, hp: 100, d: "M9A1 bazooka with HE rockets: a 6 m blast for infantry and guns, 60 mm penetration. 1 loaded, 7 spare." },
+  { key: "rocket", name: "Rocket trooper", wpn: "rkt", nade: 1, spd: 0.94, hp: 100, d: "M9A1 bazooka, HE rockets (6 m blast, 60 mm pen). Aim (right mouse) at an enemy to lock on: the rocket homes." },
   { key: "sniper", name: "Sniper", wpn: "sniper", nade: 1, spd: 0.96, hp: 90, d: "Bolt-action rifle with a scope (right mouse). One round, one man, at long range." },
   { key: "engineer", name: "Engineer", wpn: "carbine", nade: 2, spd: 1, hp: 100, d: "Carbine and a repair kit: hold F next to an allied vehicle to repair it." },
   { key: "medic", name: "Medic", wpn: "carbine", nade: 1, spd: 1.04, hp: 100, d: "Carbine and dressings: hold F by a fallen ally to revive him, or alone to treat yourself." },
@@ -14038,6 +14045,7 @@ function footStep(p, dt) {
   if (trig && f.mag <= 0 && !reloading && f.res > 0 && !f.trig) footReload(p);
   if (trig && f.mag > 0 && !reloading && f.fireCd <= 0 && f.boltT <= 0 && !(Wp.semi && f.trig) && f.sprS < 0.3 && f.thrS < 0.2) footFire(p);
   f.trig = trig;
+  if (Wp.lock) footLockStep(p, f, dt); // SAS-5: the Rocket trooper's seeker
   // engineer: hold F at an allied vehicle; anyone: ammunition from an allied vehicle or crate within 9 m
   const near = tanks.find(t => t.alive && t.team === p.team && !t.type.air && !t.type.ship && dist2d(t.pos, p.pos) < (t.type.W || 3) / 2 + 3.5);
   const fixWant = R.key === "engineer" && near && keys.has("KeyF") && !edit && (near.hp < near.type.hp || near.trackT > 0 || near.engineT > 0);
@@ -14070,6 +14078,58 @@ function footStep(p, dt) {
     if (q.t <= 0) { footGren.splice(i, 1); explode(q.p, { R: 7, kill: 0.15, dmg: 10 }, player); } }
   footSync(p);
 }
+// ---- SAS-5: the Rocket trooper's lock-on. Aimed (right mouse) with the crosshair on an enemy vehicle, aircraft or
+// soldier within the launcher's range and in clear view, the seeker locks after FLOCK.time; a locked rocket homes on
+// him (guideRocket). The lock rides out a short slip off target (keep cone, grace), and drops when the target dies or
+// leaves, goes out of range or out of sight, or you stop aiming, die or change role (a new footState has no lock).
+const FLOCK = { cone: 0.06, keep: 0.13, time: 0.7, grace: 0.4, scan: 0.1, min: 15, turn: 2.6 };
+const footLockC = e => e.type ? center(e) : [e.p[0], e.p[1] + (e.crouch > 0.5 ? 0.7 : 1.1), e.p[2]]; // vehicle centre, or a soldier's chest
+function footLockOk(p, e, from, aim, cone, range) {
+  if (!e || e.team === p.team) return false;
+  if (e.type ? (!e.alive || e.gone || e === p) : (e.dead || e.pl || e.st === "gone" || e.st === "boat")) return false;
+  const c = footLockC(e), dx = c[0] - from[0], dy = c[1] - from[1], dz = c[2] - from[2], d = Math.hypot(dx, dy, dz);
+  if (d < FLOCK.min || d > range || (aim[0] * dx + aim[1] * dy + aim[2] * dz) / d < Math.cos(cone)) return false;
+  return los(from, c) || (!!e.type && !e.type.air && !!e.TM && los(from, tp(e.TM, [0, e.type.tur.h * 0.7, 0])));
+}
+const footLocked = f => !!(f && f.lock && f.lockT >= FLOCK.time && f.lockLost <= 0);
+function footLockStep(p, f, dt) {
+  const W = p.type.Wp, from = cam.pos, aim = cam.dir, aiming = p.alive && !f.ride && f.adsS > 0.5 && !(M.sandbox && SB.edit);
+  const drop = why => { if (footLocked(f) && AC && AC.state === "running") tone("square", 520, 0.04, 0.12); f.lock = null; f.lockT = 0; f.lockLost = 0; f.lockWhy = why; };
+  if (!aiming) { if (f.lock) drop("aim"); return; }
+  if (f.lock) {
+    if (footLockOk(p, f.lock, from, aim, FLOCK.keep, W.range)) f.lockLost = 0;
+    else { const dead = f.lock.type ? !f.lock.alive || f.lock.gone : f.lock.dead || f.lock.st === "gone"; f.lockLost = (f.lockLost || 0) + dt; if (dead || f.lockLost > FLOCK.grace) drop(dead ? "dead" : "lost"); }
+  }
+  f.lockScan = (f.lockScan || 0) - dt;
+  if (!f.lock && f.lockScan <= 0) {
+    f.lockScan = FLOCK.scan; let best = null, bc = Math.cos(FLOCK.cone);
+    const test = e => { const c = footLockC(e), dx = c[0] - from[0], dy = c[1] - from[1], dz = c[2] - from[2], d = Math.hypot(dx, dy, dz) || 1, k = (aim[0] * dx + aim[1] * dy + aim[2] * dz) / d;
+      if (k > bc && footLockOk(p, e, from, aim, FLOCK.cone, W.range)) { bc = k; best = e; } };
+    for (const e of tanks) if (e.alive && e.team !== p.team) test(e);
+    for (const e of INF) if (!e.dead && !e.pl && e.team !== p.team) test(e);
+    if (best) { f.lock = best; f.lockT = 0; f.lockLost = 0; }
+  }
+  if (f.lock && f.lockLost <= 0) { const was = footLocked(f); f.lockT += dt;
+    if (!was && footLocked(f)) { if (AC && AC.state === "running") tone("square", 1320, 0.05, 0.09); announce(`Locked on ${f.lock.type ? f.lock.name : "enemy soldier"}`); } }
+}
+function drawFootLock(p, f, W, H) {
+  if (!(f.adsS > 0.5)) return;
+  const cx = W / 2, cy = H / 2, r = Math.tan(FLOCK.cone) / Math.tan(cam.fov / 2) * H / 2;
+  hx.save(); hx.lineWidth = 1.5; hx.setLineDash([5, 5]); hx.strokeStyle = f.lock ? "rgba(255,210,80,.6)" : "rgba(255,255,255,.35)"; hx.beginPath(); hx.arc(cx, cy, r, 0, Math.PI * 2); hx.stroke(); hx.setLineDash([]);
+  hx.font = "bold 12px ui-monospace, monospace"; hx.textAlign = "center";
+  const label = (t, x, y, col) => { hx.lineWidth = 3; hx.strokeStyle = "rgba(0,0,0,.85)"; hx.strokeText(t, x, y); hx.fillStyle = col; hx.fillText(t, x, y); };
+  const q = f.lock && project(footLockC(f.lock));
+  if (q) { const locked = footLocked(f), k = clamp(f.lockT / FLOCK.time, 0, 1), sz = locked ? 14 : 14 + (1 - k) * 24, col = f.lockLost > 0 ? "#ffffff" : locked ? "#ff4b3e" : "#ffd23d";
+    hx.strokeStyle = col; hx.lineWidth = locked ? 3 : 2; hx.beginPath();
+    for (const [a, b] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) { const x = q[0] + a * sz, y = q[1] + b * sz; hx.moveTo(x - a * 7, y); hx.lineTo(x, y); hx.lineTo(x, y - b * 7); }
+    hx.stroke();
+    if (locked) { hx.beginPath(); hx.moveTo(q[0], q[1] - 6); hx.lineTo(q[0] + 6, q[1]); hx.lineTo(q[0], q[1] + 6); hx.lineTo(q[0] - 6, q[1]); hx.closePath(); hx.stroke(); }
+    const kind = f.lock.type ? (f.lock.type.air ? "AIR" : f.lock.type.ship ? "SHIP" : "VEHICLE") : "INFANTRY", dist = Math.round(vlen(vsub(footLockC(f.lock), p.pos)));
+    label(f.lockLost > 0 ? "REACQUIRING" : locked ? `LOCKED ${kind} · ${dist} m` : `LOCKING ${Math.round(k * 100)}%`, q[0], q[1] - sz - 12, col);
+    if (locked) label(f.mag > 0 && f.relT <= 0 ? "FIRE: rocket homes" : "RELOADING", q[0], q[1] + sz + 18, col); }
+  else label("SEEKER · hold the crosshair on an enemy", cx, cy + r + 18, "rgba(255,255,255,.75)");
+  hx.restore();
+}
 function footReload(p) { const f = p.F, W = p.type.Wp; f.relT = f.relFull = W.rel * (f.mag > 0 && !W.rocket ? 0.85 : 1); p.reloadFull = f.relFull; f.adsS = Math.min(f.adsS, 0.5); if (AC && AC.state === "running") noiseHit(0.05, 2400, 900, 0.05); }
 function footThrow(p) {
   const f = p.F; if (!p.alive || f.nades <= 0 || f.thrT > 0 || f.ride || f.relT > 0) return;
@@ -14086,7 +14146,9 @@ function footFire(p) {
   const mz = R ? tp(R.WM, W_PTS[p.type.R.wpn].muzzle) : vadd(p.pos, [0, 1.5, 0]);
   if (W.rocket) { // the infantry teams' rocket (IFC.at), fired at the crosshair
     const A = W.rk || IFC.at, src = cam.pos, d0 = vnorm(vsub(cam.aim, mz)), e = f.spread, d = vnorm(vadd(d0, [rand(-e, e), rand(-e, e) * 0.6, rand(-e, e)]));
-    shells.push({ kind: "rocket", p: vadd(mz, vscale(d, 0.4)), v: vscale(d, A.v), owner: p, pen: A.pen, he: A.he, life: 3.4, start: mz.slice() });
+    const lk = W.lock && footLocked(f) ? f.lock : null; // SAS-5: a locked M9A1 rocket homes (guideRocket); unlocked it flies as aimed
+    shells.push({ kind: "rocket", p: vadd(mz, vscale(d, 0.4)), v: vscale(d, A.v), owner: p, pen: A.pen, he: A.he, life: 3.4, start: mz.slice(), ...(lk ? { guided: true, target: lk, turn: FLOCK.turn, vmax: A.v * 1.15 } : {}) });
+    if (W.lock) centerMsg(lk ? `ROCKET AWAY · homing on ${lk.type ? lk.name : "an enemy soldier"}` : "ROCKET AWAY · no lock, flying as aimed", lk ? "#ff8a6e" : "#ffd479", 2);
     // back-blast out of the open breech (SAS-5: from the rear of the tube, not 1.6 m behind the muzzle, which was inside the
     // third-person camera: 8 overlapping full-screen puffs on every shot); a short hot flash, then the dust it raises
     const br = R ? tp(R.WM, W_PTS[p.type.R.wpn].mag) : vsub(mz, vscale(d, 1.5));
@@ -14135,8 +14197,13 @@ function footCamera(p, dt) {
     cam.pos = vsub(safeSide, vscale(look, b)); cam.pos[1] = Math.max(cam.pos[1], heightAt(cam.pos[0], cam.pos[2]) + 0.25);
   }
   cam.dir = look;
-  const far = vadd(cam.pos, vscale(look, 1500)), h = trace(vadd(cam.pos, vscale(look, f.fp ? 0.2 : 1.2)), far, p, true);
-  cam.aim = h ? (h.p || vlerp(vadd(cam.pos, vscale(look, f.fp ? 0.2 : 1.2)), far, h.t)) : far; cam.aimHit = h && h.kind === "tank" ? h : null;
+  // SAS-5: the 1500 m aim ray (terrain, every vehicle and soldier) once per drawn frame; a slow frame runs up to five
+  // substeps and cast it five times. The extra substeps reuse it (the view moves a few cm between them).
+  const ap = cam.aimP;
+  if (cam.aimF !== frameId || !cam.aim || !ap || cam.aimLook !== look[0] + look[1] * 7 + look[2] * 13 || Math.abs(ap[0] - cam.pos[0]) + Math.abs(ap[1] - cam.pos[1]) + Math.abs(ap[2] - cam.pos[2]) > 0.5) {
+    cam.aimF = frameId; cam.aimLook = look[0] + look[1] * 7 + look[2] * 13; cam.aimP = cam.pos.slice();
+    const far = vadd(cam.pos, vscale(look, 1500)), h = trace(vadd(cam.pos, vscale(look, f.fp ? 0.2 : 1.2)), far, p, true);
+    cam.aim = h ? (h.p || vlerp(vadd(cam.pos, vscale(look, f.fp ? 0.2 : 1.2)), far, h.t)) : far; cam.aimHit = h && h.kind === "tank" ? h : null; }
   cam.aimDist = vlen(vsub(cam.aim, R.eye));
   if (FEEL.kick || FEEL.fov) { const k2 = FEEL.kick; cam.dir = vnorm(vadd(cam.dir, [0, k2 * 0.02, 0])); cam.fov *= 1 + FEEL.fov * 0.5; }
 }
@@ -14152,6 +14219,7 @@ function drawFootHud(W, H) {
   const p = player, f = p.F, T = p.type, Wp = T.Wp, cx = W / 2, cy = H / 2;
   if (!f) return;
   if (p.alive) {
+    if (Wp.lock) drawFootLock(p, f, W, H); // SAS-5
     if (Wp.scope && f.adsS > 0.6) { const r = Math.min(W, H) * 0.44; hx.fillStyle = "#000"; hx.beginPath(); hx.rect(0, 0, W, H); hx.arc(cx, cy, r, 0, Math.PI * 2, true); hx.fill();
       hx.strokeStyle = "rgba(0,0,0,.9)"; hx.lineWidth = 2; hx.beginPath(); hx.moveTo(cx - r, cy); hx.lineTo(cx - 6, cy); hx.moveTo(cx + 6, cy); hx.lineTo(cx + r, cy); hx.moveTo(cx, cy + 6); hx.lineTo(cx, cy + r); hx.stroke();
       hx.lineWidth = 3; hx.beginPath(); hx.moveTo(cx, cy + 22); hx.lineTo(cx, cy + r); hx.stroke(); hx.fillStyle = "#e8ffe0"; hx.font = "13px ui-monospace, monospace"; hx.textAlign = "left"; hx.fillText(`${Math.round(cam.aimDist)} m`, cx + 16, cy - 10); hx.textAlign = "center"; }
@@ -14718,6 +14786,7 @@ function startPlaying() {
   initAudio();
   const fresh = state === "menu" || state === "over";
   if (fresh) newBattle();
+  if (fresh && typeof footMeshes === "function") { footMeshes(false); footMeshes(true); } // SAS-5: both kits up front (the German one was built on first contact: a ~150 ms freeze)
   closeModal(); lobbyMenu(false);
   state = "playing"; overlay.style.display = "none";
   const fd = $("fade"); fd.classList.add("on"); requestAnimationFrame(() => requestAnimationFrame(() => fd.classList.remove("on"))); // fade in from black
@@ -15161,7 +15230,17 @@ function setDraw(M, tint, emis, alpha, spec, detail) {
 }
 // spec: 0 = matte (soil, wood, plaster), ~0.3 painted steel, ~0.5 aircraft lacquer; detail: procedural ground grain
 const drawMesh = (...a) => draw(...a); // pass 37: footDrawRig shadows `draw` with its collector
+// SAS-5: inside drawBatched, plain opaque draws of a non-indexed mesh are gathered and drawn instanced (one draw per mesh)
+let BATCH = null;
+function drawBatched(fn) {
+  const q = BATCH = new Map();
+  try { fn(); } finally { BATCH = null; }
+  if (!q.size) return; const prev = cur; use(shadowPass ? depthProgI : P.inst);
+  for (const [mesh, a] of q) { for (let i = 0; i < a.length; i += 3) { const t = a[i + 1]; pushInst(a[i], t[0], t[1], t[2], a[i + 2], 1); } flushInst(mesh); }
+  if (prev) use(prev);
+}
 function draw(mesh, M, tint, emis = 0, alpha = 1, spec = 0, detail = 0) {
+  if (BATCH && alpha === 1 && !detail && !spec && !mesh.indexed) { let a = BATCH.get(mesh); if (!a) BATCH.set(mesh, a = []); a.push(M.slice(), tint, emis); return; }
   setDraw(M, tint, emis, alpha, spec, detail);
   gl.bindVertexArray(mesh.vao);
   if (mesh.indexed) gl.drawElements(gl.TRIANGLES, mesh.count, gl.UNSIGNED_INT, 0);
@@ -15261,7 +15340,7 @@ function renderShadows(alt, airView) {
   const sink = [];
   for (const t of tanks) if (unitVisible(LFR, t)) drawUnit(t, sink); // own tank still casts a shadow in the gunner sight
   drawFoot(); drawInfantryNear(); // GUE-7: the player soldier casts his own shadow (GUE-5: and the nearest AI soldiers)
-  use(depthProgI); drawInfantryMid(); drawTrees(LFR, 1e9, false); // pass 37: the middle band casts shadows too
+  use(depthProgI); drawTrees(LFR, 1e9, false); // SAS-5: the middle band (30-100 m) no longer casts shadows: a few shadow texels each, for up to 24 rigs gathered and drawn a second time
   shadowPass = false;
   gl.disable(gl.POLYGON_OFFSET_FILL);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
