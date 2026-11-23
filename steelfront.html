@@ -15367,7 +15367,7 @@ function renderShadows(alt, airView) {
   for (const d of [depthProgI, depthProg]) { gl.useProgram(d.p); gl.uniformMatrix4fv(d.u.uVP, false, LVP); }
   cur = depthProg; shadowPass = true;
   drawChunks(propsMesh, LFR); drawChunks(vegMesh, LFR, Q.vegDist);
-  if (covers.length) drawCovers(null);
+  if (covers.length) drawCovers(LFR); // SAS-5 (r4): culled to the shadow map's own volume (it was every cover, trench and obstacle on the map: 1448 instances in D-Day for a map 300 m across)
   const sink = [];
   for (const t of tanks) if (unitVisible(LFR, t)) drawUnit(t, sink); // own tank still casts a shadow in the gunner sight
   drawFoot(); drawInfantryNear(); // GUE-7: the player soldier casts his own shadow (GUE-5: and the nearest AI soldiers)
