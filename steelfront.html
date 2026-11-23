@@ -149,6 +149,8 @@
   #boot .fb button:first-child { background: #b9771b; border-color: #f0b43c; } #boot .fb button:focus-visible { outline: 3px solid #9fd4ff; outline-offset: 2px; }
   #boot .fd { white-space: pre-wrap; word-break: break-word; max-height: 30vh; overflow: auto; font: 11px/1.4 ui-monospace, monospace; background: rgba(0,0,0,.35); padding: 8px; border-radius: 6px; opacity: .85; }
   #rtErr { position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 9999; max-width: 90vw; padding: 8px 12px; border-radius: 8px; background: rgba(60,16,12,.92); border: 1px solid #ff8a76; color: #ffe2dc; font: 12px/1.4 system-ui, sans-serif; cursor: pointer; }
+  #swGl { position: fixed; left: 50%; bottom: 44px; transform: translateX(-50%); z-index: 50; max-width: min(640px, 70vw); padding: 7px 30px 7px 11px; border-radius: 8px; background: rgba(60,30,8,.92); border: 1px solid #e0a040; color: #ffe7c2; font: 12px/1.4 system-ui, sans-serif; }
+  #swGl b { color: #ffd08a; } #swGl button { position: absolute; right: 6px; top: 6px; background: none; border: 0; color: #ffe7c2; font-size: 16px; cursor: pointer; padding: 0 4px; }
   #nogl { display: none; position: fixed; inset: 0; align-items: center; justify-content: center; text-align: center; padding: 20px; }
   /* cinematic intro */
   body.cine-on #top, body.cine-on #info, body.cine-on #minimap, body.cine-on #killfeed, body.cine-on #center, body.cine-on #hitmsg,
@@ -1229,6 +1231,7 @@
   </div>
 </div>
 <div id="hello" hidden><b>STEEL FRONT</b><span id="helloSub"></span></div>
+<div id="swGl" role="alert" hidden><b>No graphics card in use</b>: the browser draws with the CPU (<span id="swGlName"></span>), so the game is slow at any setting. Fix: Chrome / Edge Settings → System → <b>Use graphics acceleration when available</b> on, relaunch; if already on, install the graphics driver (chrome://gpu shows what is used). Meanwhile the resolution is lowered.<button type="button" aria-label="Dismiss" id="swGlX">×</button></div>
 <div id="nogl"><div><h2>WebGL2 is not available</h2><p>Please open this file in a recent version of Chrome, Edge, Firefox or Safari.</p></div></div>
 
 <script>
@@ -1239,7 +1242,7 @@
 // errors are collected, and a failure turns the boot screen into a diagnostic panel. No personal data is collected:
 // build, stage, error text, browser/engine version, WebGL support and the GPU renderer string.
 (() => {
-  const B = window.__SF_BOOT = { build: "pass 54 (SAS-5) · 2026-11-23", stage: "html", stages: [], errors: [], t0: performance.now(), ready: false, failed: false,
+  const B = window.__SF_BOOT = { build: "pass 54 r5 (SAS-5) · 2026-11-23", stage: "html", stages: [], errors: [], t0: performance.now(), ready: false, failed: false,
     fail: (/[?&]bootfail=([a-z]+)/.exec(location.search) || [])[1] || "" }; // ?bootfail=webgl|storage|shader|shaderall|throw: test hooks only
   B.src = "<!DOCTYPE html>\n" + document.documentElement.outerHTML + "\n"; // clean copy for the download button (taken before anything changes)
   const $b = q => document.querySelector("#boot " + q);
@@ -2713,7 +2716,9 @@ const QUALITY = {
 };
 const QLADDER = [["high", 1], ["medium", 1], ["medium", 0.85], ["low", 1], ["low", 0.85], ["low", 0.7], ["low", 0.6], ["low", 0.5]];
 const GPU_NAME = (() => { try { const e = gl.getExtension("WEBGL_debug_renderer_info"); return e ? String(gl.getParameter(e.UNMASKED_RENDERER_WEBGL)) : ""; } catch (e) { return ""; } })();
-const SOFTWARE_GL = /swiftshader|llvmpipe|softpipe|software/i.test(GPU_NAME);
+// SAS-5 (r5): "Microsoft Basic Render Driver" (WARP) is Windows' CPU rasterizer, used when Chrome has no usable GPU driver or
+// hardware acceleration is off; it was not recognised, so the game ran as if on a graphics card (a player's report: 4 fps)
+const SOFTWARE_GL = /swiftshader|llvmpipe|softpipe|software|basic render|microsoft basic|\bwarp\b/i.test(GPU_NAME);
 let Q = QUALITY.medium, renderScale = 1;
 function compile(vsSrc, fsSrc, attribs) {
   const mk = (type, src) => {
@@ -3344,6 +3349,26 @@ function chunkedMesh(b) {
     for (let v = 0; v < 3; v++) for (let a = 0; a < 3; a++) { const x = b.pos[o + v * 3 + a]; if (x < ch.mn[a]) ch.mn[a] = x; if (x > ch.mx[a]) ch.mx[a] = x; }
   }
   const mesh = uploadMesh(pos, nor, col, null, mat);
+  mesh.chunks = chunks.filter(c => c.count > 0);
+  return mesh;
+}
+// SAS-5 (r5): the same for an indexed mesh with no map-cell layout (the far ring, the sea, the cloud field): its triangles are
+// regrouped into G x G regions of its own extent (stable, so each region keeps its order) and uploaded with region bounds.
+// These were drawn whole every frame even when behind the camera: ~470k of the ~560k triangles per frame in a naval
+// battle on foot, which a CPU (software) renderer pays for vertex by vertex.
+function uploadRegions(pos, nor, col, idx, mat = null, G = 12) {
+  const nTri = idx.length / 3; let x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9;
+  for (let i = 0; i < pos.length; i += 3) { x0 = Math.min(x0, pos[i]); x1 = Math.max(x1, pos[i]); z0 = Math.min(z0, pos[i + 2]); z1 = Math.max(z1, pos[i + 2]); }
+  const sx = G / Math.max(1e-6, x1 - x0), sz = G / Math.max(1e-6, z1 - z0), reg = new Uint16Array(nTri), cnt = new Uint32Array(G * G);
+  for (let t = 0; t < nTri; t++) { const a = idx[t * 3] * 3, b = idx[t * 3 + 1] * 3, c = idx[t * 3 + 2] * 3;
+    const r = clamp(Math.floor(((pos[a] + pos[b] + pos[c]) / 3 - x0) * sx), 0, G - 1) + clamp(Math.floor(((pos[a + 2] + pos[b + 2] + pos[c + 2]) / 3 - z0) * sz), 0, G - 1) * G;
+    reg[t] = r; cnt[r]++; }
+  const fill = new Uint32Array(G * G), chunks = []; let o = 0;
+  for (let r = 0; r < G * G; r++) { fill[r] = o; chunks.push({ first: o * 3, count: cnt[r] * 3, mn: [1e9, 1e9, 1e9], mx: [-1e9, -1e9, -1e9] }); o += cnt[r]; }
+  const out = new Uint32Array(idx.length);
+  for (let t = 0; t < nTri; t++) { const ch = chunks[reg[t]], d = fill[reg[t]]++ * 3;
+    for (let k = 0; k < 3; k++) { const v = idx[t * 3 + k]; out[d + k] = v; for (let a = 0; a < 3; a++) { const x = pos[v * 3 + a]; if (x < ch.mn[a]) ch.mn[a] = x; if (x > ch.mx[a]) ch.mx[a] = x; } } }
+  const mesh = uploadMesh(pos, nor, col, out, mat);
   mesh.chunks = chunks.filter(c => c.count > 0);
   return mesh;
 }
@@ -6757,7 +6782,7 @@ function navDetailMesh() {
     if (flat) { const i = bz * W1 + bx, j = i + B * W1; oi.push(i, j, i + B, i + B, j, j + B); continue; }
     for (let iz = bz; iz < Math.min(bz + B, NHN); iz++) for (let ix = bx; ix < Math.min(bx + B, NHN); ix++) cell(ix, iz);
   }
-  return uploadMesh(op, on, oc, oi);
+  return uploadRegions(op, on, oc, oi);
 }
 
 // -- Cinder Isles: an active volcano east of the battle area, basalt islands with black-sand beaches, a working harbour
@@ -7147,7 +7172,7 @@ function buildWater() {
     let any = false; for (const [x, z] of [[x0, z0], [x0 + OCELL, z0], [x0, z0 + OCELL], [x0 + OCELL, z0 + OCELL]]) if (heightAt(x, z) < W + 1) any = true;
     if (any) quad(x0, z0, OCELL, (x, z) => W - heightAt(x, z));
   }
-  return idx.length ? uploadMesh(pos, nor, col, idx, mt) : null;
+  return idx.length ? uploadRegions(pos, nor, col, idx, mt) : null; // SAS-5 (r5): culled per region
 }
 
 // ---------------------------------------------------------------- pass 20: endless countryside for aircraft
@@ -7293,18 +7318,21 @@ function generateWorld() {
     pos.push(x, h, z); nor.push(...n); col.push(...groundColor(x, z, h, n[1]));
   }
   // indices are laid out cell by cell (CG x CG map cells) so off-screen parts of the terrain can be skipped
-  const tChunks = [], CN = N / CG;
+  // SAS-5 (r5): cells wholly 4 m or more under the (opaque, flat) water are never seen, from any camera that can be there:
+  // they are left out (in a naval battle that is most of the battlefield's sea bed: ~150k triangles a frame)
+  const tChunks = [], CN = N / CG, sunk = WATER_Y === null ? -1e9 : WATER_Y - 4;
   for (let cz = 0; cz < CG; cz++) for (let cx = 0; cx < CG; cx++) {
     const first = idx.length; let y0 = 1e9, y1 = -1e9;
     for (let iz = cz * CN; iz < (cz + 1) * CN; iz++) for (let ix = cx * CN; ix < (cx + 1) * CN; ix++) {
       const i = iz * (N + 1) + ix;
+      if (HM[i] < sunk && HM[i + 1] < sunk && HM[i + N + 1] < sunk && HM[i + N + 2] < sunk) continue;
       idx.push(i, i + N + 1, i + 1, i + 1, i + N + 1, i + N + 2);
       for (const j of [i, i + 1, i + N + 1, i + N + 2]) { y0 = Math.min(y0, HM[j]); y1 = Math.max(y1, HM[j]); }
     }
     tChunks.push({ first, count: idx.length - first, mn: [cx * CS - HALF, y0, cz * CS - HALF], mx: [(cx + 1) * CS - HALF, y1, (cz + 1) * CS - HALF] });
   }
   terrainMesh = uploadMesh(pos, nor, col, idx);
-  terrainMesh.chunks = tChunks;
+  terrainMesh.chunks = tChunks.filter(c => c.count > 0);
   // outer countryside so aircraft have room to manoeuvre (coarse grid, aligned with the map edge)
   for (let iz = 0; iz <= ON; iz++) for (let ix = 0; ix <= ON; ix++) {
     const x = ix * OCELL - OUTER, z = iz * OCELL - OUTER, e = Math.max(Math.abs(x), Math.abs(z)) / HALF;
@@ -7377,7 +7405,7 @@ function generateWorld() {
       for (let i = 1; i <= N; i++) { const cur = sk(ax + dx * i * CELL, az + dz * i * CELL); oi.push(prev, prev + 1, cur, cur, prev + 1, cur + 1, prev, cur, prev + 1, cur, cur + 1, prev + 1); prev = cur; }
     }
   }
-  outerMesh = NH ? navDetailMesh() : uploadMesh(op, on, oc, oi);
+  outerMesh = NH ? navDetailMesh() : uploadRegions(op, on, oc, oi);
   // clouds
   const cb = builder();
   for (let k = 0; k < 46; k++) {
@@ -7388,7 +7416,7 @@ function generateWorld() {
       addLoft(cb, rings, [0.97, 0.97, 1.0], false, false);
     }
   }
-  cloudMesh = finish(cb);
+  cloudMesh = uploadRegions(cb.pos, cb.nor, cb.col, Uint32Array.from({ length: cb.pos.length / 3 }, (_, i) => i), null, 8); // SAS-5 (r5): culled per region
 
   // buildings
   buildings.length = 0; trees.length = 0;
@@ -14966,7 +14994,7 @@ let ladder = SOFTWARE_GL ? 5 : 1;
 // Low itself is fatal, and then the boot panel explains it.
 let gfxFallback = "";
 function applyGfx() {
-  const [name, sc] = gfxMode === "auto" ? QLADDER[ladder] : [gfxMode, 1];
+  const [name, sc] = gfxMode === "auto" ? QLADDER[ladder] : [gfxMode, gfxMode === "low" && SOFTWARE_GL ? QLADDER[Math.max(3, ladder)][1] : 1];
   try { Q = QUALITY[name]; renderScale = sc; setupShadowMap(Q.shadowRes); buildPrograms(); }
   catch (e) {
     if (name === "low") throw e;
@@ -14977,7 +15005,7 @@ function applyGfx() {
   resize(); gfxLabel();
 }
 function gfxLabel() {
-  const txt = gfxMode === "auto" ? `Auto · ${Q.label}${renderScale < 1 ? ` ${Math.round(renderScale * 100)}%` : ""}` : Q.label;
+  const txt = gfxMode === "auto" ? `Auto · ${Q.label}${renderScale < 1 ? ` ${Math.round(renderScale * 100)}%` : ""}` : `${Q.label}${renderScale < 1 ? ` ${Math.round(renderScale * 100)}%` : ""}`;
   $("gfx").textContent = $("lbGfx").textContent = `Graphics: ${txt}`;
   $("fps").textContent = `${perf.fps ? Math.round(perf.fps) : "–"} fps · ${txt}`;
 }
@@ -14987,12 +15015,13 @@ function adaptQuality(ms, active) {
   perf.ms += ms; perf.n++;
   if (perf.ms < 1500 || perf.n < 3) return;
   const fps = perf.n * 1000 / perf.ms; perf.ms = perf.n = 0; perf.fps = fps;
-  if (gfxMode === "auto") {
+  if (gfxMode === "auto" || (gfxMode === "low" && SOFTWARE_GL)) { // SAS-5 (r5): on a CPU renderer Low still lowers its resolution (ladder steps 3..)
+    if (gfxMode !== "auto" && ladder < 3) ladder = 3;
     if (perf.skip > 0) perf.skip--; // the first window after a change pays for shader compiles and buffer reallocation
     else if (fps < 42 && ladder < QLADDER.length - 1) {
       if (perf.lastUp) perf.need = Math.min(40, perf.need * 2); // the last step up was too much: probe less often
       ladder = Math.min(QLADDER.length - 1, ladder + (fps < 22 ? 2 : 1)); perf.good = 0; perf.lastUp = false; perf.skip = 1; gfxPending = true;
-    } else if (fps > 56 && ladder > 0) {
+    } else if (fps > 56 && ladder > (gfxMode === "auto" ? 0 : 3)) {
       if (++perf.good >= perf.need) { ladder--; perf.good = 0; perf.lastUp = true; perf.skip = 1; gfxPending = true; }
     } else { perf.good = 0; perf.lastUp = false; }
   }
@@ -15005,6 +15034,12 @@ $("gfx").addEventListener("click", () => {
 });
 BOOT.mark("graphics preset");
 applyGfx();
+if (SOFTWARE_GL) { // SAS-5 (r5): say so, with what fixes it (dismissed for this session)
+  let seen = false; try { seen = sessionStorage.getItem("steelfront.swgl") === "1"; } catch (e) { /* storage unavailable */ }
+  $("swGlName").textContent = GPU_NAME.replace(/^ANGLE \((.*)\)$/, "$1").slice(0, 70); if (!seen && !SELFTEST) $("swGl").hidden = false;
+  let shownT = 0; setInterval(() => { if (!$("swGl").hidden && state === "playing" && (shownT += 1) >= 25) $("swGl").hidden = true; }, 1000); // out of the way after 25 s of play
+  $("swGlX").addEventListener("click", () => { $("swGl").hidden = true; try { sessionStorage.setItem("steelfront.swgl", "1"); } catch (e) { /* not kept */ } });
+}
 BOOT.mark("settings");
 loadSettings();
 // audio starts on the first click or key (browsers block sound until a user gesture); buttons give a soft tick
@@ -15279,10 +15314,11 @@ function draw(mesh, M, tint, emis = 0, alpha = 1, spec = 0, detail = 0) {
 }
 // draw the cells of a chunked static mesh that are inside frustum F (and within maxD of the camera);
 // neighbouring visible cells are merged into one draw call
-function drawChunks(mesh, F, maxD = 0, detail = 0) {
-  setDraw(IDENT, WHITE, 0, 1, 0, detail);
+function drawChunks(mesh, F, maxD = 0, detail = 0, spec = 0, emis = 0, alpha = 1, ox = 0, oz = 0) {
+  setDraw(ox || oz ? trans(ox, 0, oz) : IDENT, WHITE, emis, alpha, spec, detail);
   gl.bindVertexArray(mesh.vao);
-  const md2 = maxD * maxD, cx = cam.pos[0], cz = cam.pos[2];
+  const md2 = maxD * maxD, cx = cam.pos[0] - ox, cz = cam.pos[2] - oz; // SAS-5 (r5): ox / oz: the mesh drawn moved by that much
+  if (ox || oz) { const f = F; F = f.map(p => [p[0], p[1], p[2], p[3] + p[0] * ox + p[2] * oz]); } // the frustum in the mesh's own frame
   let a = -1, e = 0;
   const flush = () => {
     if (a >= 0) { if (mesh.indexed) gl.drawElements(gl.TRIANGLES, e - a, gl.UNSIGNED_INT, a * 4); else gl.drawArrays(gl.TRIANGLES, a, e - a); }
@@ -15446,15 +15482,17 @@ function render() {
       draw(flagMesh, chain(trans(p[0], p[1] + 2.5, p[2]), rotY(now * 0.5)), c, 0.4);
     }
   }
+  // SAS-5 (r5): the (opaque) water before the ground, so the sea bed under it fails the depth test instead of running the
+  // ground shader first and then being painted over: in a naval battle that was most of the screen shaded twice
+  if (waterMesh) { use(P.plain); drawChunks(waterMesh, FR, 0, 0, 0.3); }
+  if (farStat.on && WATER_Y !== null) { use(P.plain); for (const c of FAR.values()) if (c.water && boxVisible(FR, c.mn, c.mx)) draw(c.water, IDENT, WHITE, 0, 1, 0.3); }
   use(P.ground);
   gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-1, -4); // road surface sits a hair above the terrain
   drawChunks(roadMesh, FR, 0, 0.8);
   gl.disable(gl.POLYGON_OFFSET_FILL);
   drawChunks(terrainMesh, FR, 0, 1);
-  draw(outerMesh, IDENT, WHITE, 0, 1, 0, 0.7);
+  drawChunks(outerMesh, FR, 0, 0.7); // SAS-5 (r5): only the regions in view
   if (farStat.on) for (const c of FAR.values()) if (c.mesh && boxVisible(FR, c.mn, c.mx)) draw(c.mesh, IDENT, WHITE, 0, 1, 0, 0.7);
-  if (waterMesh) { use(P.plain); draw(waterMesh, IDENT, WHITE, 0, 1, 0.3); }
-  if (farStat.on && WATER_Y !== null) { use(P.plain); for (const c of FAR.values()) if (c.water && boxVisible(FR, c.mn, c.mx)) draw(c.water, IDENT, WHITE, 0, 1, 0.3); }
   // sky last: only the pixels nothing else covered
   gl.depthFunc(gl.LEQUAL); gl.depthMask(false); gl.disable(gl.CULL_FACE);
   for (const [pr, mesh] of [[skyProg, skyDome], [sunProg, sunPatch]]) {
@@ -15468,9 +15506,9 @@ function render() {
   // translucent: clouds, propeller discs, smoke and fire
   gl.enable(gl.BLEND); gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA); /* pass 32: alpha accumulates as a + dst(1 - a), so fire and flashes over a masked surface keep their bloom */
   use(P.fxPlain);
-  draw(cloudMesh, IDENT, WHITE, 0.4, 0.82);
+  drawChunks(cloudMesh, FR, 0, 0, 0, 0.4, 0.82);
   if (farStat.on) { const tx = Math.round(cam.pos[0] / 6200), tz = Math.round(cam.pos[2] / 6200); // the cloud field repeats every 6.2 km out there
-    for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) if (tx + a || tz + b) draw(cloudMesh, trans((tx + a) * 6200, 0, (tz + b) * 6200), WHITE, 0.4, 0.82); }
+    for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) if (tx + a || tz + b) drawChunks(cloudMesh, FR, 0, 0, 0, 0.4, 0.82, (tx + a) * 6200, (tz + b) * 6200); }
   for (const [M, a] of discs) draw(discMesh, M, [0.2, 0.2, 0.2], 0, a);
   use(P.fx);
   // track marks: dark, fading strips pressed into the ground
