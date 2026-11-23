@@ -1239,7 +1239,7 @@
 // errors are collected, and a failure turns the boot screen into a diagnostic panel. No personal data is collected:
 // build, stage, error text, browser/engine version, WebGL support and the GPU renderer string.
 (() => {
-  const B = window.__SF_BOOT = { build: "pass 46 (GUE-5) · 2026-11-22", stage: "html", stages: [], errors: [], t0: performance.now(), ready: false, failed: false,
+  const B = window.__SF_BOOT = { build: "pass 54 (SAS-5) · 2026-11-23", stage: "html", stages: [], errors: [], t0: performance.now(), ready: false, failed: false,
     fail: (/[?&]bootfail=([a-z]+)/.exec(location.search) || [])[1] || "" }; // ?bootfail=webgl|storage|shader|shaderall|throw: test hooks only
   B.src = "<!DOCTYPE html>\n" + document.documentElement.outerHTML + "\n"; // clean copy for the download button (taken before anything changes)
   const $b = q => document.querySelector("#boot " + q);
@@ -10204,7 +10204,9 @@ function infNearAnim(s, dt) {
   if (s.dead) { f.deadT = s.deadT; } else f.deadT = 0;
   q.rigR = footRig(q, f); void k;
 }
-function drawInfantryNear() { for (const s of INF_NEAR) if (s.rig && s.rig.rigR) footDrawRig(s.rig, s.rig.F, s.rig.rigR, false); }
+// SAS-5: in the shadow pass only the soldiers within 18 m (their contact shadow is what reads; past that a rig's shadow
+// is a few texels of the shadow map, but each one still cost ~18 draws and ~5k triangles a second time per frame)
+function drawInfantryNear() { const cx = cam.pos[0], cz = cam.pos[2]; for (const s of INF_NEAR) if (s.rig && s.rig.rigR && (!shadowPass || (s.p[0] - cx) ** 2 + (s.p[2] - cz) ** 2 < 324)) footDrawRig(s.rig, s.rig.F, s.rig.rigR, false); }
 // pass 51: the far figure (past the detailed and middle bands) is built to the detailed rig's measurements and kit, so
 // the hand-over reads as a change of detail, not of soldier: the rig's heights (hips 0.94 m, shoulders 1.53 m, head
 // 1.67 m; kneeling hips 0.53 m), its chest turned 0.36 rad (0.52 aimed) right of the aim, the low-ready carry and the
@@ -10214,7 +10216,7 @@ function drawInfantryNear() { for (const s of INF_NEAR) if (s.rig && s.rig.rigR)
 // along bones, written straight into the instance buffer (basisScaled, no matrix allocations), about 24 per soldier
 // (11 past 230 m on screen); pure presentation, reads state only.
 let INF_FARC = null; const infFarCols = () => INF_FARC || (INF_FARC = [FTC, FTC_DE].map(C => ({ jk: C.jacket, pa: C.pants, he: C.hel, bo: C.boot, lg: C.legg, web: C.web, sk: C.skin, wd: C.wood, st: C.steel, tu: C.tube, pack: C.bread || C.web })));
-const INF_FAR_WK = { rifle: 1, carbine: 1, k98: 1, lmg: 1, smg: 0, mp40: 0, mg42: 0, at: 2, pschreck: 2 }; // 1: wooden stock, 0: steel, 2: rocket tube
+const INF_FAR_WK = { rifle: 1, carbine: 1, k98: 1, lmg: 1, smg: 0, mp40: 0, mg42: 0, at: 2, pschreck: 2, rkt: 2 }; // 1: wooden stock, 0: steel, 2: rocket tube
 const IFV = { A: [0, 0, 0], B: [0, 0, 0], X: [0, 0, 0], Y: [0, 0, 0], Z: [0, 0, 0], m: [0, 0, 0] };
 function infFarFigure(s, ddz) {
   const C = infFarCols()[s.team ? 1 : 0], de = s.team === 1, p = s.p, c = Math.cos(s.yaw), sn = Math.sin(s.yaw), dead = !!s.dead, dk = dead ? 0.72 : 1, lite = ddz > 230;
@@ -13135,6 +13137,10 @@ const FOOT_WPN = {
   carbine: { name: "M1 carbine", mag: 15, res: 90, rof: 0.15, semi: true, hip: 0.035, ads: 0.006, move: 0.02, rel: 2.1, range: 300, kick: 0.32, fov: 0.85, snd: 3200, vol: 0.16 },
   lmg:     { name: "M1918 BAR", mag: 20, res: 160, rof: 0.12, hip: 0.07, ads: 0.016, move: 0.03, rel: 3.4, range: 500, kick: 0.42, fov: 0.85, bipod: 0.35, snd: 2200, vol: 0.22, mg: true },
   at:      { name: "M1 bazooka", mag: 1, res: 5, rof: 0.6, semi: true, hip: 0.03, ads: 0.006, move: 0.02, rel: 3.4, range: 220, kick: 1.1, fov: 0.75, rocket: true },
+  // SAS-5: the M9A1, the two-piece bazooka that replaced the M1A1 (reflex sight, magneto trigger, no batteries). It fires
+  // HE rockets here: a wider blast for dug-in infantry, MG nests and soft vehicles, less penetration than the AT team's HEAT
+  rkt:     { name: "M9A1 bazooka (HE)", mag: 1, res: 7, rof: 0.6, semi: true, hip: 0.028, ads: 0.004, move: 0.02, rel: 2.9, range: 320, kick: 1.0, fov: 0.62, rocket: true,
+             rk: { v: 92, pen: 60, he: { R: 6, kill: 0.75, dmg: 34 } } },
   sniper:  { name: "M1903A4 scoped rifle", mag: 5, res: 35, rof: 1.25, semi: true, bolt: true, hip: 0.06, ads: 0.0006, move: 0.05, rel: 3.2, range: 900, kick: 0.9, fov: 0.26, scope: true, snd: 3400, vol: 0.24 },
 };
 const FOOT_ROLES = [
@@ -13142,6 +13148,7 @@ const FOOT_ROLES = [
   { key: "assault", name: "Assault", wpn: "smg", nade: 4, spd: 1.08, hp: 100, d: "Submachine gun, 30-round magazines, 4 grenades. Fastest on foot." },
   { key: "mg", name: "Machine gunner", wpn: "lmg", nade: 1, spd: 0.86, hp: 115, d: "Automatic rifle, 20-round magazines. Crouch to brace it (bipod): far tighter spread." },
   { key: "at", name: "Anti-tank", wpn: "at", nade: 1, spd: 0.92, hp: 100, d: "Bazooka: rockets with the infantry teams' penetration (95 mm). 1 loaded, 5 spare." },
+  { key: "rocket", name: "Rocket trooper", wpn: "rkt", nade: 1, spd: 0.94, hp: 100, d: "M9A1 bazooka with HE rockets: a 6 m blast for infantry and guns, 60 mm penetration. 1 loaded, 7 spare." },
   { key: "sniper", name: "Sniper", wpn: "sniper", nade: 1, spd: 0.96, hp: 90, d: "Bolt-action rifle with a scope (right mouse). One round, one man, at long range." },
   { key: "engineer", name: "Engineer", wpn: "carbine", nade: 2, spd: 1, hp: 100, d: "Carbine and a repair kit: hold F next to an allied vehicle to repair it." },
   { key: "medic", name: "Medic", wpn: "carbine", nade: 1, spd: 1.04, hp: 100, d: "Carbine and dressings: hold F by a fallen ally to revive him, or alone to treat yourself." },
@@ -13459,6 +13466,18 @@ function buildFootMeshes(de = false) {
     steel(() => { fBox(b, 0.055, 0.145, 0.12, 0.012, 0.05, 0.03, C.steel); fBox(b, 0.055, 0.15, 0.45, 0.012, 0.06, 0.012, C.steel); fBox(b, 0, 0.068, 0.06, 0.03, 0.03, 0.08, C.steel); fBox(b, -0.045, 0.1, -0.1, 0.03, 0.05, 0.1, [0.25, 0.26, 0.2]); }); // sights (left), trigger housing, battery box
     sling(b, [0.04, 0.1, 0.45], [0.04, 0.1, -0.55], 0.09);
   });
+  W.rkt = footMesh(b => { // SAS-5 M9A1 bazooka: two tube halves joined by a coupling collar, reflex sight on the left, magneto trigger, skeleton stock
+    paint(() => { sTubeZ(b, [[-0.78, 0.031, 0.031, 0, 0.1], [-0.02, 0.031, 0.031, 0, 0.1]], C.tube, 14, 2); sTubeZ(b, [[0.06, 0.031, 0.031, 0, 0.1], [0.78, 0.031, 0.031, 0, 0.1]], C.tube, 14, 2);
+      sTubeZ(b, [[-0.64, 0.036, 0.036, 0, 0.1], [-0.5, 0.036, 0.036, 0, 0.1]], [0.24, 0.27, 0.17], 14, 2); }); // the rear half's canvas-wrapped hand guard
+    steel(() => { sTubeZ(b, [[-0.03, 0.04, 0.04, 0, 0.1], [0.07, 0.04, 0.04, 0, 0.1]], C.steelL, 14, 2); for (const z of [-0.025, 0.065]) sTubeZ(b, [[z - 0.006, 0.044, 0.044, 0, 0.1], [z + 0.006, 0.044, 0.044, 0, 0.1]], C.steel, 14, 2); // coupling collar and its locking rings
+      sTubeZ(b, [[-0.8, 0.04, 0.04, 0, 0.1], [-0.77, 0.034, 0.034, 0, 0.1]], C.steelL, 14, 2, false); sTubeZ(b, [[0.76, 0.036, 0.036, 0, 0.1], [0.785, 0.036, 0.036, 0, 0.1]], C.steel, 14, 2, false); // breech ring, muzzle band
+      fBox(b, 0, 0.142, -0.72, 0.02, 0.016, 0.05, C.steel); fBox(b, 0.012, 0.148, -0.7, 0.006, 0.012, 0.012, C.steelL); // the rear latch and its contact spring that hold and fire the rocket
+      for (const sx of [-1, 1]) fBox(b, sx * 0.012, 0.038, -0.25, 0.006, 0.008, 0.26, C.steel); fBox(b, 0, 0.03, -0.38, 0.034, 0.08, 0.012, C.steelL); fBox(b, 0, 0.055, -0.12, 0.03, 0.012, 0.012, C.steel); // skeleton shoulder stock (two rails, butt plate)
+      fBox(b, 0.058, 0.153, 0.1, 0.022, 0.044, 0.07, C.steel); fBox(b, 0.058, 0.17, 0.067, 0.018, 0.026, 0.004, [0.36, 0.44, 0.46]); fBox(b, 0.042, 0.128, 0.1, 0.012, 0.016, 0.03, C.steel); // reflex sight, its lens, the bracket
+      fBox(b, 0, 0.068, 0.04, 0.026, 0.032, 0.09, C.steel); fBox(b, -0.022, 0.06, 0.03, 0.01, 0.022, 0.04, C.steelL); }); // magneto trigger housing, safety
+    wood(() => { sProfile(b, [[-0.03, 0.06], [0.03, 0.06], [0.015, -0.01], [-0.005, -0.06], [-0.04, -0.06], [-0.03, -0.01]], -0.017, 0.017, C.wood); sProfile(b, [[0.26, 0.066], [0.32, 0.066], [0.31, -0.04], [0.27, -0.04]], -0.017, 0.017, C.wood); }); // pistol grip, front grip
+    tguard(b); sling(b, [0.035, 0.1, 0.5], [0.035, 0.1, -0.6], 0.09);
+  });
   W.sniper = footMesh(b => { // M1903A4: straight-wristed stock, Weaver scope low over the action, bolt handle on the right
     wood(() => sProfile(b, [[-0.4, 0.034], [-0.2, 0.03], [-0.06, 0.022], [-0.03, 0.012], [0.0, 0.016], [0.0, 0.02], [0.52, 0.018], [0.53, 0.004], [0.52, -0.012], [0.08, -0.016], [0.04, -0.024], [0.0, -0.028], [-0.05, -0.044], [-0.4, -0.09], [-0.41, -0.03]], -0.021, 0.021, C.wood));
     steel(() => { sProfile(b, [[-0.412, 0.036], [-0.402, 0.036], [-0.402, -0.09], [-0.412, -0.092]], -0.022, 0.022, C.steelL);
@@ -13523,6 +13542,7 @@ const W_PTS = {
   k98:      { gl: [0, -0.014, 0.25], sight: [0, 0.07, 0.2], relief: 0.26, muzzle: [0, 0.038, 0.75], mag: [0, 0.05, 0.06], magM: "magRifle", magTop: true, stock: [0, -0.025, -0.41] },
   mp40:     { gl: [0, -0.06, 0.1], sight: [0, 0.07, -0.05], muzzle: [0, 0.034, 0.41], mag: [0, 0.02, 0.1], magM: "magStick", stock: [0, -0.01, -0.33] },
   mg42:     { gl: [0, 0.0, 0.27], sight: [0, 0.105, 0.04], muzzle: [0, 0.04, 0.9], mag: [0.03, 0.03, 0.06], magM: "belt", stock: [0, -0.025, -0.41], bipod: [0, 0.03, 0.62] },
+  rkt:      { gl: [0, -0.04, 0.29], sight: [0.06, 0.168, 0.1], muzzle: [0, 0.1, 0.78], mag: [0, 0.1, -0.78], magM: "rocket", rear: true, tube: true, stock: [0, 0.06, -0.26], rkZ: 0.76 },
   pschreck: { gl: [0, 0.035, 0.12], sight: [0.06, 0.17, 0.0], muzzle: [0, 0.1, 0.84], mag: [0, 0.1, -0.82], magM: "rocket", rear: true, tube: true, stock: [0, 0.06, -0.24] },
 };
 let FOOTM = null, FOOTM_DE = null;
@@ -13697,7 +13717,7 @@ function footDrawRig(p, f, R, fp, sink = null) { // sink(mesh, M, tint, emis): c
   const hideBody = fp && p.alive; // first person: no head and trunk in front of the camera; arms, hands and weapon stay
   if (!hideBody) {
     D(m.pelvis, R.pelM); D(m.torso, R.torM); D(m.headR, R.headM); D(T.role === "sniper" ? m.helmetNet : T.role === "medic" ? m.helmetMed : m.helmet, R.headM);
-    const gear = { mg: m.bandolier, at: m.rocketBag, engineer: m.toolPack, medic: m.medBag, radio: m.radioPack }[T.role]; if (gear) D(gear, R.torM);
+    const gear = { mg: m.bandolier, at: m.rocketBag, rocket: m.rocketBag, engineer: m.toolPack, medic: m.medBag, radio: m.radioPack }[T.role]; if (gear) D(gear, R.torM);
   }
   if (!fp || !p.alive || f.pitch < -0.55) for (const L of R.legs) { // legs (in first person only when you look down at them)
     D(m.thigh, boneM(L.hp, L.kn.J, R.F0)); D(m.shin, boneM(L.kn.J, L.kn.E, R.F0));
@@ -13719,7 +13739,7 @@ function footDrawRig(p, f, R, fp, sink = null) { // sink(mesh, M, tint, emis): c
     else D(m.W.lmgBipodF, chain(R.WM, trans(...P.bipod))); }
   if (f.fixS > 0.3 && p.alive && (T.role === "medic" || T.role === "radio")) D(T.role === "medic" ? m.W.kit : m.W.handset, chain(trans(...R.gL), mat3of(R.torM))); // a field dressing / the radio handset in the left hand
   const mm = m.W[P.magM];
-  if (R.WMd) { /* dropped: no magazine drawn */ } else if (P.rear) { if (f.mag > 0 && !R.magOff) D(mm, chain(R.WM, trans(0, 0.1, 0.68))); } // the rocket shows in the muzzle when loaded
+  if (R.WMd) { /* dropped: no magazine drawn */ } else if (P.rear) { if (f.mag > 0 && !R.magOff) D(mm, chain(R.WM, trans(0, 0.1, P.rkZ || 0.68))); } // the rocket shows in the muzzle when loaded
   else if (!R.magOff) { if (f.mag > 0 || !P.magTop) D(mm, chain(R.WM, trans(...P.mag))); }
   if (R.magOff && R.magOff.p) D(mm, chain(trans(...R.magOff.p), mat3of(R.WM)));
   if (f.thrS > 0.3 && f.thrT > 0.3) D(m.W.nade, trans(...R.gL));
@@ -14032,9 +14052,13 @@ function footFire(p) {
   cam.pitch = clamp(cam.pitch + W.kick * 0.012 * (1 - f.bipS * 0.6), -1.35, 1.35); cam.yaw = wrapA(cam.yaw + (Math.random() - 0.5) * W.kick * 0.008);
   const mz = R ? tp(R.WM, W_PTS[p.type.R.wpn].muzzle) : vadd(p.pos, [0, 1.5, 0]);
   if (W.rocket) { // the infantry teams' rocket (IFC.at), fired at the crosshair
-    const A = IFC.at, src = cam.pos, d0 = vnorm(vsub(cam.aim, mz)), e = f.spread, d = vnorm(vadd(d0, [rand(-e, e), rand(-e, e) * 0.6, rand(-e, e)]));
+    const A = W.rk || IFC.at, src = cam.pos, d0 = vnorm(vsub(cam.aim, mz)), e = f.spread, d = vnorm(vadd(d0, [rand(-e, e), rand(-e, e) * 0.6, rand(-e, e)]));
     shells.push({ kind: "rocket", p: vadd(mz, vscale(d, 0.4)), v: vscale(d, A.v), owner: p, pen: A.pen, he: A.he, life: 3.4, start: mz.slice() });
-    for (let i = 0; i < 8; i++) puff(vsub(mz, vscale(d, 1.6)), [-d[0] * 7 + rand(-1, 1), rand(0.4, 1.5), -d[2] * 7 + rand(-1, 1)], [0.78, 0.76, 0.72], rand(0.8, 1.4), rand(0.5, 1.0), 0, 0, 1.5, 0.7); // back-blast
+    // back-blast out of the open breech (SAS-5: from the rear of the tube, not 1.6 m behind the muzzle, which was inside the
+    // third-person camera: 8 overlapping full-screen puffs on every shot); a short hot flash, then the dust it raises
+    const br = R ? tp(R.WM, W_PTS[p.type.R.wpn].mag) : vsub(mz, vscale(d, 1.5));
+    puff(br, [-d[0] * 4, 0.3, -d[2] * 4], [1, 0.7, 0.35], 0.5, 0.12, 0, 1, 0.9, 0.9);
+    for (let i = 0; i < 6; i++) puff(vsub(br, vscale(d, 0.6 + i * 0.35)), [-d[0] * 7 + rand(-1, 1), rand(0.4, 1.5), -d[2] * 7 + rand(-1, 1)], [0.78, 0.76, 0.72], rand(0.6, 1.1), rand(0.5, 1.0), 0, 0, 1.5, 0.7);
     if (AC && AC.state === "running") noiseHit(0.45, 1500, 200, 0.45);
     void src; return;
   }
@@ -15342,10 +15366,15 @@ function render() {
     pushInst(basisScaled(X, Y, Z, s.p, 0.7 * tk, 0.7 * tk, 1.3 * tk), 1, 0.9, 0.6, 1, 0.75);
   }
   flushInst(puffMesh);
+  // SAS-5: on foot the camera stands 1-2 m up, in the dust, smoke and back-blast round the soldier: a puff the eye is
+  // inside covers the whole screen, and a dozen of them overdrew every pixel over and over (the infantry lag on
+  // integrated GPUs). Those are skipped and the ones within about a puff's size of the eye fade out, as a soft particle would.
+  const pfoot = !!(player && player.type && player.type.foot && state === "playing"), pcx = cam.pos[0], pcy = cam.pos[1], pcz = cam.pos[2];
   for (const q of parts) {
     const sz = q.size;
     if (!sphereVisible(FR, q.p[0], q.p[1], q.p[2], sz)) continue;
-    const k = q.life / q.max, a = q.alpha * (q.grow > 0 ? k : Math.min(1, k * 2)), ry = q.max * 7, c = Math.cos(ry) * sz, sn = Math.sin(ry) * sz, m = M16;
+    let fe = 1; if (pfoot && !q.emis) { const dd = Math.hypot(q.p[0] - pcx, q.p[1] - pcy, q.p[2] - pcz), r0 = sz * 0.75; if (dd < r0) continue; fe = Math.min(1, (dd - r0) / (sz * 1.5 + 0.5)); }
+    const k = q.life / q.max, a = q.alpha * fe * (q.grow > 0 ? k : Math.min(1, k * 2)), ry = q.max * 7, c = Math.cos(ry) * sz, sn = Math.sin(ry) * sz, m = M16;
     m[0] = c; m[1] = 0; m[2] = -sn; m[3] = 0; m[4] = 0; m[5] = sz; m[6] = 0; m[7] = 0; m[8] = sn; m[9] = 0; m[10] = c; m[11] = 0; m[12] = q.p[0]; m[13] = q.p[1]; m[14] = q.p[2]; m[15] = 1;
     pushInst(m, q.col[0], q.col[1], q.col[2], q.emis, a);
   }
