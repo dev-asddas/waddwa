@@ -9804,8 +9804,14 @@ function drawDdayDecor(F) {
     for (const sx of [-1, 1]) draw(cubeMesh, chain(R, trans(sx * (W / 2 - 0.3), 0.25, BOAT.rampL / 2), scl(0.12, 0.4, BOAT.rampL)), hull.map(v => v * 0.9), 0, 1, 0); // ramp edge rails
   }
   const flash = ms.dd ? clamp(1 - (now - (ms.dd.flashT ?? -9)) / 0.35, 0, 1) : 0;
-  for (const [x, z, L, a] of DD_SHIPS) { // destroyers offshore, guns trained on the coast
+  for (const sh of DD_SHIPS) { const [x, z, L] = sh; // destroyers offshore, guns trained on the coast
     if (F && !sphereVisible(F, x, 10, z, L)) continue;
+    if (flash > 0) ddShip(sh, flash); else playDraws(sh.rec || (sh.rec = recDraws(() => ddShip(sh, 0)))); // SAS-5 (r4): static between gun flashes: recorded once
+  }
+}
+function ddShip(sh, flash) {
+  const [x, z, L, a] = sh;
+  {
     const S = chain(trans(x, WATER_Y, z), rotY(a + Math.PI / 2)), grey = [0.46, 0.49, 0.52], k = L / 115, dh = f => shipDeck(f);
     draw(shipMesh(L), S, [1, 1, 1], 0, 1, 0.3);
     const box = (f, y, w, h, l, c, x0 = 0) => draw(cubeMesh, chain(S, trans(x0, dh(f) + y + h / 2, f * L), scl(w, h, l)), c, 0, 1, 0);
@@ -10317,20 +10323,23 @@ function drawInfantry(F) {
   flushInst(cubeMesh);
 }
 // static D-Day dressing drawn with the beach cover: the trench on the bluff crest, barbed wire on the sand, wrecked craft
-function drawDdayDressing(F) {
+function drawDdayDressing(F) { // SAS-5 (r4): the trench line, wire and wrecks never change in a battle: recorded once per layout
+  const C = DDL.dressC || (DDL.dressC = [...DDL.trench.map(q => [q.x, q.y, q.z, 8, recDraws(() => drawDdayDressing1(q, 0))]), ...DDL.wire.map(w => [w.x, w.y, w.z, 7, recDraws(() => drawDdayDressing1(w, 1))]),
+    ...DDL.wrecks.map(w => [w.x, WATER_Y, w.z, 12, recDraws(() => drawDdayDressing1(w, 2))])]);
+  for (const e of C) if (!F || sphereVisible(F, e[0], e[1], e[2], e[3])) playDraws(e[4]);
+}
+function drawDdayDressing1(it, kind) {
   const earth = [0.36, 0.31, 0.22], bag = [0.55, 0.5, 0.36];
-  for (const q of DDL.trench) {
-    if (F && !sphereVisible(F, q.x, q.y, q.z, 8)) continue;
+  for (const q of kind === 0 ? [it] : []) {
     draw(cubeMesh, chain(trans(q.x, q.y + 0.06, q.z), rotY(q.a), scl(q.l, 0.12, 1.6)), [0.18, 0.15, 0.11], 0, 1, 0); // the trench floor, dark
     draw(cubeMesh, chain(trans(q.x - Math.sin(q.a + Math.PI / 2) * 0, q.y + 0.4, q.z - 1.1), rotY(q.a), scl(q.l, 0.8, 0.7)), bag, 0, 1, 0); // sandbagged parapet facing the sea
     draw(cubeMesh, chain(trans(q.x, q.y + 0.3, q.z + 1.1), rotY(q.a), scl(q.l, 0.6, 0.6)), earth, 0, 1, 0); // spoil on the landward side
   }
-  for (const w of DDL.wire) {
-    if (F && !sphereVisible(F, w.x, w.y, w.z, 7)) continue;
+  for (const w of kind === 1 ? [it] : []) {
     for (const ox of [-4, 0, 4]) for (const s of [-1, 1]) draw(cubeMesh, chain(trans(w.x + ox, w.y + 0.5, w.z), rotZ(s * 0.5), scl(0.08, 1.2, 0.08)), [0.22, 0.2, 0.18], 0, 1, 0); // crossed stakes
     for (const h of [0.35, 0.7, 1.0]) draw(cubeMesh, chain(trans(w.x, w.y + h, w.z + (h - 0.6) * 0.4), scl(9, 0.03, 0.03)), [0.3, 0.28, 0.26], 0, 1, 0);  // wire strands
   }
-  for (const w of DDL.wrecks) { if (F && !sphereVisible(F, w.x, WATER_Y, w.z, 12)) continue; draw(lcvpMesh, chain(trans(w.x, WATER_Y - 0.4, w.z), rotY(w.a), rotZ(w.roll)), [0.42, 0.4, 0.38], 0, 1, 0); }
+  for (const w of kind === 2 ? [it] : []) { draw(lcvpMesh, chain(trans(w.x, WATER_Y - 0.4, w.z), rotY(w.a), rotZ(w.roll)), [0.42, 0.4, 0.38], 0, 1, 0); }
 }
 
 // ---------------------------------------------------------------- Air Strike: Operation Hammerfall (aircraft mission)
@@ -10534,6 +10543,15 @@ function drawCovers(F) { drawBatched(() => drawCovers0(F)); }
 function drawCovers0(F) {
   covers.forEach((c, k) => {
     if (F && !sphereVisible(F, c.x, c.y0 + 1, c.z, 6)) return;
+    const key = `${k}|${c.state}|${c.kind}|${c.x}|${c.z}|${c.y0}|${c.mx[1]}|${c.hx}|${c.hz}`; // SAS-5 (r4): rebuilt only when the cover changes (hit, moved, list reordered)
+    if (!c.dc || c.dc.key !== key) c.dc = { key, L: recDraws(() => drawCover1(c, k)) };
+    playDraws(c.dc.L);
+  });
+  if ((M.key === "dday" || M.sandbox) && DDL) { drawDdayDecor(F); drawDdayDressing(F); } // the sandbox keeps each map's dressing
+  drawCovers1(F);
+}
+function drawCover1(c, k) {
+  {
     const base = COVER_COL[c.kind] || COVER_COL.stone, dk = c.state ? 0.72 : 1, col = base.map(v => v * dk);
     if (c.state < 2 && c.kind === "hedgehog") { // D-Day beach obstacle: three crossed steel girders
       const y = c.y0 + 0.3 + (c.mx[1] - c.y0 - 0.3) * 0.5, a = hash(k, 3, 5) * Math.PI, s = c.state ? 0.75 : 1;
@@ -10566,8 +10584,9 @@ function drawCovers0(F) {
       const a = hash(k, i, 7) - 0.5, b = hash(i, k, 9) - 0.5;
       draw(cubeMesh, chain(trans(c.x + a * c.hx * 1.6, c.y0 + 0.4, c.z + b * c.hz * 1.6), rotY(a * 3), scl(1.2 + b, 0.35, 1 + a)), col, 0, 1, 0);
     }
-  });
-  if ((M.key === "dday" || M.sandbox) && DDL) { drawDdayDecor(F); drawDdayDressing(F); } // the sandbox keeps each map's dressing
+  }
+}
+function drawCovers1(F) {
   if ((M.key === "strike" || M.sandbox) && SKL && (!F || sphereVisible(F, GD.x, 25, GD.z, 60))) drawDepotDecor();
   for (const cr of crates) {
     if (cr.used) continue;
@@ -15239,7 +15258,19 @@ function drawBatched(fn) {
   for (const [mesh, a] of q) { for (let i = 0; i < a.length; i += 3) { const t = a[i + 1]; pushInst(a[i], t[0], t[1], t[2], a[i + 2], 1); } flushInst(mesh); }
   if (prev) use(prev);
 }
+// SAS-5 (r4): static scenery is recorded once and replayed. Covers and the D-Day dressing rebuilt every matrix (chain of
+// trans / rot / scl, ~6 allocations each) and every tint for hundreds of objects, twice a frame (shadow and main pass):
+// ~1.4 ms of allocation and garbage per frame in D-Day. recDraws runs a drawing function with draw() writing into a list
+// (nothing is drawn); playDraws issues that list as draw() would (into the open batch, or drawn directly).
+let REC = null;
+function recDraws(fn) { const prev = REC, L = REC = []; try { fn(); } finally { REC = prev; } return L; }
+function playDraws(L) {
+  for (let i = 0; i < L.length; i++) { const e = L[i], mesh = e[0];
+    if (BATCH && e[4] === 1 && !e[6] && !e[5] && !mesh.indexed) { let a = BATCH.get(mesh); if (!a) BATCH.set(mesh, a = []); a.push(e[1], e[2], e[3]); }
+    else draw(mesh, e[1], e[2], e[3], e[4], e[5], e[6]); }
+}
 function draw(mesh, M, tint, emis = 0, alpha = 1, spec = 0, detail = 0) {
+  if (REC) { REC.push([mesh, Float32Array.from(M), tint.slice(), emis, alpha, spec, detail]); return; }
   if (BATCH && alpha === 1 && !detail && !spec && !mesh.indexed) { let a = BATCH.get(mesh); if (!a) BATCH.set(mesh, a = []); a.push(M.slice(), tint, emis); return; }
   setDraw(M, tint, emis, alpha, spec, detail);
   gl.bindVertexArray(mesh.vao);
