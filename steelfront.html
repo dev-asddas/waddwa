@@ -1242,7 +1242,7 @@
 // errors are collected, and a failure turns the boot screen into a diagnostic panel. No personal data is collected:
 // build, stage, error text, browser/engine version, WebGL support and the GPU renderer string.
 (() => {
-  const B = window.__SF_BOOT = { build: "pass 54 r7 (SAS-5) · 2026-11-24", stage: "html", stages: [], errors: [], t0: performance.now(), ready: false, failed: false,
+  const B = window.__SF_BOOT = { build: "pass 54 r7b (SAS-5) · 2026-11-24", stage: "html", stages: [], errors: [], t0: performance.now(), ready: false, failed: false,
     fail: (/[?&]bootfail=([a-z]+)/.exec(location.search) || [])[1] || "" }; // ?bootfail=webgl|storage|shader|shaderall|throw: test hooks only
   B.src = "<!DOCTYPE html>\n" + document.documentElement.outerHTML + "\n"; // clean copy for the download button (taken before anything changes)
   const $b = q => document.querySelector("#boot " + q);
@@ -1295,8 +1295,10 @@
     document.body.appendChild(s); // runs now, as an ordinary global script; uncaught errors reach the handler above
     if (!B.ready && !B.failed) B.show("error", "The game script stopped before the hangar was ready");
   };
-  // two frames: the boot screen is on screen before the long synchronous start
-  requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(B.start, 0)));
+  // wait for DOMContentLoaded so the 1.6 MB #sfMain script tag is completely parsed before starting, then paint two frames
+  const go = () => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(() => { B.src = "<!DOCTYPE html>\n" + document.documentElement.outerHTML + "\n"; B.start(); }, 0)));
+  if (document.readyState === "loading") addEventListener("DOMContentLoaded", go, { once: true });
+  else go();
 })();
 </script>
 <script type="text/plain" id="sfMain">
@@ -2697,7 +2699,7 @@ function groundColor(x, z, h, ny) {
 // ---------------------------------------------------------------- WebGL setup
 const canvas = document.getElementById("game");
 // MSAA is done in an offscreen multisample buffer (High quality only), so the context itself stays cheap
-const gl = canvas.getContext("webgl2", { antialias: false, powerPreference: "high-performance" });
+const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, powerPreference: "high-performance" });
 if (!gl) {
   document.getElementById("overlay").style.display = "none";
   if (window.__SF_BOOT) BOOT.show("webgl", "This browser did not give the game a WebGL2 context");
@@ -2714,7 +2716,7 @@ const QUALITY = {
   medium: { label: "Medium", msaa: 0, shadowRes: 1536, taps: 1, detail: 1, spec: 1, dprCap: 1.5, vegDist: 700, treeDist: 1000, partCap: 900, post: 1 },
   low: { label: "Low", msaa: 0, shadowRes: 0, taps: 0, detail: 0, spec: 0, dprCap: 1, vegDist: 420, treeDist: 800, partCap: 500, post: 0 },
 };
-const QLADDER = [["high", 1], ["medium", 1], ["medium", 0.85], ["low", 1], ["low", 0.85], ["low", 0.7], ["low", 0.6], ["low", 0.5]];
+const QLADDER = [["high", 1], ["medium", 1], ["medium", 0.85], ["low", 1], ["low", 0.85], ["low", 0.7], ["low", 0.6], ["low", 0.5], ["low", 0.42]];
 const GPU_NAME = (() => { try { const e = gl.getExtension("WEBGL_debug_renderer_info"); return e ? String(gl.getParameter(e.UNMASKED_RENDERER_WEBGL)) : ""; } catch (e) { return ""; } })();
 // SAS-5 (r5): "Microsoft Basic Render Driver" (WARP) is Windows' CPU rasterizer, used when Chrome has no usable GPU driver or
 // hardware acceleration is off; it was not recognised, so the game ran as if on a graphics card (a player's report: 4 fps)
@@ -2776,19 +2778,82 @@ function sceneProgram(o) {
 #define SPEC ${o.spec}
 #define INST ${o.inst}
 #define SOFT ${o.soft ? 1 : 0}
+#define FAST_LOW ${(o.detail === 0 && o.taps === 0 && o.spec === 0) ? 1 : 0}
 `;
   return compile(D + `
 in vec3 aPos; in vec3 aNor; in vec3 aCol; in vec4 aMat;
 uniform vec2 uTrk;
-flat out int vMat; out vec3 vP; out vec2 vMP;
 #if INST
 in vec4 aI0; in vec4 aI1; in vec4 aI2; in vec4 aI3; in vec3 aICol; in vec2 aIEx;
-out vec3 vTint; out vec2 vEx;
 #else
 uniform mat4 uM;
 #endif
-uniform mat4 uVP; uniform mat4 uLVP; uniform float uNOff;
-uniform vec3 uSun; uniform vec3 uCam; uniform vec3 uFogCol; uniform float uFogFar;
+uniform mat4 uVP; uniform vec3 uSun; uniform vec3 uCam; uniform vec3 uFogCol; uniform float uFogFar;
+#if FAST_LOW
+#if !INST
+uniform vec3 uTint; uniform float uEmis; uniform float uAlpha;
+#endif
+uniform vec3 uLightD; uniform float uAmbD;
+out vec4 vLit;
+#if INST && !SOFT
+flat out int vMat; out vec2 vWake;
+#endif
+${GLSL_GRADE_FAST}
+void main() {
+#if INST
+  mat4 M = mat4(aI0, aI1, aI2, aI3); vec3 tint = aICol; float emis = aIEx.x, alpha = aIEx.y;
+#else
+  mat4 M = uM; vec3 tint = uTint; float emis = uEmis, alpha = uAlpha;
+#endif
+  vec3 pos = aPos, nrm = aNor; float mid = aMat.x;
+  if (mid > 31.5) {
+    if (uTrk.x != 0.0 || uTrk.y != 0.0) {
+      float a = (aPos.x < 0.0 ? uTrk.x : uTrk.y) / max(aMat.w, 0.05), cs = cos(a), sn = sin(a);
+      vec2 q = pos.yz - aMat.yz;
+      pos.yz = aMat.yz + vec2(q.x * cs - q.y * sn, q.x * sn + q.y * cs);
+      nrm.yz = vec2(nrm.y * cs - nrm.z * sn, nrm.y * sn + nrm.z * cs);
+    }
+    mid -= 32.0;
+  }
+  int id = int(mid + 0.5);
+#if INST && !SOFT
+  vMat = id; vWake = aPos.xy;
+#endif
+  vec4 w = M * vec4(pos, 1.0);
+#if SOFT
+  vec3 nRaw = mat3(M) * normalize(aPos);
+#else
+  vec3 nRaw = mat3(M) * nrm;
+#endif
+  float nLen = length(nRaw);
+  vec3 n = nLen > 1e-5 ? nRaw / nLen : vec3(0.0, 1.0, 0.0);
+  vec3 base = aCol * tint;
+  if (id == 15 || id == 16) {
+    float foam = 1.0 - smoothstep(0.03, 0.35, aMat.y);
+    base = mix(base, vec3(0.92, 0.95, 0.96), foam * 0.72);
+  }
+  float nl = dot(n, uSun), dif = max(nl, 0.0), wrap = max(nl * 0.5 + 0.5, 0.0);
+  vec3 sunCol = vec3(1.22, 1.03, 0.80) * (vec3(1.0) - uLightD);
+  vec3 amb = mix(vec3(0.27, 0.23, 0.17), vec3(0.31, 0.40, 0.58), 0.5 + 0.5 * n.y) * (0.82 + 0.18 * wrap) * (1.0 - uAmbD);
+  vec3 col = mix(base * (amb + sunCol * dif * 0.95), base, emis);
+  vec3 r = w.xyz - uCam; float dist = length(r);
+  float f = clamp(dist / uFogFar, 0.0, 1.0); f *= f;
+  vec3 rd = r / max(dist, 1e-3);
+  float sg = max(dot(rd, uSun), 0.0); float sg2 = sg * sg;
+  vec3 fogC = uFogCol + vec3(0.20, 0.16, 0.11) * (sg2 * sg2 * sg2);
+  col = mix(col, fogC, f * (1.0 - emis * 0.6));
+#if SOFT
+  alpha *= smoothstep(0.08, 0.7, abs(dot(n, -rd)));
+#endif
+  vLit = vec4(gradeFast(col), alpha);
+  gl_Position = uVP * w;
+}
+#else
+flat out int vMat; out vec3 vP; out vec2 vMP;
+#if INST
+out vec3 vTint; out vec2 vEx;
+#endif
+uniform mat4 uLVP; uniform float uNOff;
 out vec3 vN; out vec3 vC; out vec3 vW; out vec4 vFog; // vFog: fog colour (with sun glow) and amount
 #if TAPS > 0
 out vec4 vL;
@@ -2826,7 +2891,25 @@ void main() {
   vL = uLVP * vec4(w.xyz + normalize(vN) * uNOff, 1.0); // normal-offset lookup avoids shadow acne
 #endif
   gl_Position = uVP * w;
-}`, D + `
+}
+#endif`, D + `
+#if FAST_LOW
+precision highp float;
+in vec4 vLit;
+#if INST && !SOFT
+flat in int vMat; in vec2 vWake;
+#endif
+out vec4 o;
+void main() {
+#if INST && !SOFT
+  vec4 c = vLit;
+  if (vMat == 20) c.a *= 1.0 - smoothstep(0.25, 1.0, length(vWake));
+  o = c;
+#else
+  o = vLit;
+#endif
+}
+#else
 precision highp float; precision highp sampler2DShadow;
 in vec3 vN; in vec3 vC; in vec3 vW; in vec4 vFog;
 flat in int vMat; in vec3 vP; in vec2 vMP;
@@ -3008,7 +3091,8 @@ void main() {
   }
 #endif
   float sh = shadow();
-  float nl = dot(n, uSun), dif = max(mix(nl, nl * 0.5 + 0.5, mWrap), 0.0) * sh;
+  float nl = dot(n, uSun);
+  float dif = max(mix(nl, nl * 0.5 + 0.5, mWrap), 0.0) * sh;
   vec3 sunCol = vec3(1.22, 1.03, 0.80) * (vec3(1.0) - uLightD);  // warm key light
   vec3 skyAmb = vec3(0.31, 0.40, 0.58), gndAmb = vec3(0.27, 0.23, 0.17); // cooler, darker fill: shadows read blue
   float wrap = max(nl * 0.5 + 0.5, 0.0);                         // a little wrap so the shadow side of a hull still shows form
@@ -3043,7 +3127,8 @@ void main() {
   // pass 32: with post on, opaque surfaces write a bloom mask to the scene alpha (emissive + specular glint), so sunlit
   // white paint (stars, crosses, hull numbers, snow) clips to white without the bright-pass haloing it like a flame
   if (uBM > 0.5 && alpha > 0.995) o.a = bm;
-}`, ATTRIBS);
+}
+#endif`, ATTRIBS);
 }
 // depth-only programs for the sun's shadow map (plain and instanced)
 const depthSrcF = `#version 300 es
@@ -3292,7 +3377,7 @@ function uploadMesh(pos, nor, col, idx, mat = null) {
 }
 // ---- instancing: one shared stream buffer, 21 floats per instance (mat4, tint rgb, emissive, alpha)
 const INST_F = 21, instBuf = gl.createBuffer();
-let instData = new Float32Array(INST_F * 2048), instN = 0;
+let instData = new Float32Array(INST_F * 2048), instN = 0, instBufCap = 0;
 function instVao(mesh) {
   if (mesh.ivao) return mesh.ivao;
   const vao = gl.createVertexArray();
@@ -3320,7 +3405,11 @@ function pushInst(M, r, g, b, emis, alpha) {
 function flushInst(mesh) {
   if (instN > 0) {
     gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, instData.subarray(0, instN * INST_F), gl.STREAM_DRAW);
+    if (instBufCap < instData.byteLength) {
+      instBufCap = instData.byteLength;
+      gl.bufferData(gl.ARRAY_BUFFER, instBufCap, gl.STREAM_DRAW);
+    }
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, instData.subarray(0, instN * INST_F));
     gl.bindVertexArray(instVao(mesh));
     gl.drawArraysInstanced(gl.TRIANGLES, 0, mesh.count, instN);
   }
@@ -5575,28 +5664,34 @@ function navKey(e) {
 // ---- rendering: ships, missiles, torpedoes, foam and the zone beacons
 function drawShip(t) {
   const T = t.type, dead = !t.alive, d = shadowPass ? 1e9 : viewDist(t.pos), tint = dead ? [0.3, 0.28, 0.26] : t.tint || SHIP_TINT[t.team], sp = dead ? 0.05 : 0.35;
-  draw(d > 700 ? T.hullLo : T.hullMesh, t.M, tint, 0, 1, sp);
+  if (SOFTWARE_GL && !shadowPass && d > 260) { draw(shipWarpMesh(T), t.M, tint, 0, 1, sp); return; }
+  draw(d > (SOFTWARE_GL ? 380 : 700) ? T.hullLo : T.hullMesh, t.M, tint, 0, 1, sp);
   const pl = dead ? [0.13, 0.12, 0.115] : [1, 1, 1]; // pass 31: a sunk / burnt-out ship's hull number, rails and fittings were drawn at full white over the charred hull
-  if (d < 420 && !shadowPass) draw(T.hullDetail, t.M, pl, 0, 1, sp);
-  if (d < 260 && !shadowPass) { const pm = shipPolishMesh(T.base || T); if (pm) draw(pm, t.M, pl, 0, 1, sp); }
+  if (d < (SOFTWARE_GL ? 240 : 420) && !shadowPass) draw(T.hullDetail, t.M, pl, 0, 1, sp);
+  if (d < (SOFTWARE_GL ? 140 : 260) && !shadowPass) { const pm = shipPolishMesh(T.base || T); if (pm) draw(pm, t.M, pl, 0, 1, sp); }
   drawDeckMarks(t, d); // painted deck spots; for your aircraft a pulsing ring and approach lights
   if (d < 900 && ((t.isPlayer ? !t.rideV || t.rideV.own : t.standIn) || t.name === "hangar")) { const Bt = T.base || T; for (const id of profile.mods[Bt.key] || []) { const um = upgradeMesh(Bt, id); if (um) draw(um, t.M, tint, 0, 1, sp); } } // your upgrades are visible on the model
   if (d < 900 && T.radarPts) for (const r of T.radarPts) draw(RADAR_MESH, chain(t.M, trans(r[0], r[1], r[2]), rotY(t.alive ? now * 2.2 + t.slot : 0.4), scl(r[3], r[3], r[3])), tint, 0, 1, sp);
   if (d < 700 && !T.sub && !shadowPass) { const sz = -0.47 * T.L; draw(cubeMesh, chain(t.M, trans(0, dY(T, -0.47) + 2.5, sz), scl(0.12, 5, 0.12)), [0.3, 0.3, 0.3]); draw(cubeMesh, chain(t.M, trans(0, dY(T, -0.47) + 4.4, sz), rotY(Math.sin(now * 3 + t.slot) * 0.25), trans(0, 0, -1.15), scl(0.05, 1.3, 2.3)), t.team === player.team ? [0.25, 0.55, 1] : [1, 0.3, 0.25], 0.25); }
   if (T.parked && d < 1200 && AIR.albatross.planeMesh) for (const [x, u] of T.parked) draw(AIR.albatross.planeMesh, chain(t.M, trans(x, T.deckY + 1.4, u * T.L), rotY(0.5)), dead ? tint : [0.72, 0.75, 0.78], 0, 1, sp);
-  if (d > 1400 && !shadowPass) return;
+  if (d > (SOFTWARE_GL ? 650 : 1400) && !shadowPass) return;
   const mounts = T.mounts.map((m, i) => [m, t.sh.guns[i]]).concat(T.sec ? T.sec.mounts.map((m, i) => [m, t.sh.sec[i]]) : []);
   for (const [m, g] of mounts) { const G0 = GUN_GEO[m.m]; draw(G0.houseMesh, mountM(t, m, g), tint, 0, 1, sp); draw(G0.barrelMesh, barrelM(t, m, g), tint, 0, 1, sp); }
-  if (d < 900) T.ciws.forEach((c, i) => { const cw = t.sh.ciws[i], B = chain(t.M, trans(c.x || 0, c.y, c.z * T.L), rotY(cw.yaw)); draw(CIWS_MESH, B, tint, 0, 1, sp); draw(CIWS_GUN, chain(B, trans(0, 1.5, 0.6), rotX(-cw.el)), tint, cw.fire > 0 ? 0.3 : 0, 1, sp); });
+  if (d < (SOFTWARE_GL ? 420 : 900)) T.ciws.forEach((c, i) => { const cw = t.sh.ciws[i], B = chain(t.M, trans(c.x || 0, c.y, c.z * T.L), rotY(cw.yaw)); draw(CIWS_MESH, B, tint, 0, 1, sp); draw(CIWS_GUN, chain(B, trans(0, 1.5, 0.6), rotX(-cw.el)), tint, cw.fire > 0 ? 0.3 : 0, 1, sp); });
 }
 function drawNavalWorld(F) {
   if (MAPD.volc) drawVolcano(F);
   for (const d of navDrones) { if (!sphereVisible(F, d.p[0], d.p[1], d.p[2], 6)) continue; const Z = vnorm([d.v ? d.v[0] : 0, 0, d.v ? d.v[2] : 1]), X = vnorm(vcross([0, 1, 0], Z)); draw(DRONE_MESH, chain(basisMat(X, [0, 1, 0], Z, d.p), rotZ(-0.3)), WHITE, 0, 1, 0.4); }
   for (const m of navMsl) { if (!sphereVisible(F, m.p[0], m.p[1], m.p[2], 4)) continue; const Z = vnorm(m.v), X = vnorm(vcross([0, 1, 0], Z)), Y = vcross(Z, X); draw(m.kind ? SAM_MESH : MSL_MESH, basisMat(X, Y, Z, m.p), WHITE, 0, 1, 0.4); draw(cubeMesh, mul(basisMat(X, Y, Z, vsub(m.p, vscale(Z, 2.9))), scl(0.5, 0.5, 1.2)), [1, 0.75, 0.35], 1); }
   for (const q of navTorp) { if (!sphereVisible(F, q.p[0], q.p[1], q.p[2], 4)) continue; const Z = q.d, X = vnorm(vcross([0, 1, 0], Z)); draw(TORP_MESH, basisMat(X, [0, 1, 0], Z, q.p), WHITE, 0, 1, 0.2); }
-  zones.forEach(z => { const zp = z.pos, c = z.owner === 0 ? [0.35, 0.65, 1] : z.owner === 1 ? [1, 0.35, 0.28] : [0.95, 0.92, 0.85], R = z.r || 150, bob = Math.sin(now * 0.9) * 0.3;
-    if (sphereVisible(F, zp[0], 8, zp[2], 30)) { draw(ZONE_TOWER, trans(zp[0], WATER_Y + bob - 1, zp[2]), [1, 1, 1], 0, 1, 0.2); draw(ZONE_LAMP, trans(zp[0], WATER_Y + bob - 1, zp[2]), c, 0.85, 1, 0); }
-    for (let i = 0; i < 16; i++) { const a = i / 16 * Math.PI * 2, x = zp[0] + Math.sin(a) * R, zz = zp[2] + Math.cos(a) * R; if (!sphereVisible(F, x, 2, zz, 6)) continue; draw(BUOY_MESH, chain(trans(x, WATER_Y - 0.4 + Math.sin(now * 1.3 + i) * 0.25, zz), rotZ(Math.sin(now + i) * 0.08)), i % 2 ? c : [0.95, 0.95, 0.9], i % 2 ? 0.5 : 0, 1, 0.2); } });
+  const cx = cam.pos[0], cz = cam.pos[2], mD2 = SOFTWARE_GL ? (frameU.fogFar + 100) ** 2 : 1e18;
+  zones.forEach(z => { const zp = z.pos, c = z.owner === 0 ? [0.35, 0.65, 1] : z.owner === 1 ? [1, 0.35, 0.28] : [0.95, 0.92, 0.85], bob = Math.sin(now * 0.9) * 0.3;
+    if ((zp[0] - cx) ** 2 + (zp[2] - cz) ** 2 <= mD2 && sphereVisible(F, zp[0], 8, zp[2], 30)) { draw(ZONE_TOWER, trans(zp[0], WATER_Y + bob - 1, zp[2]), [1, 1, 1], 0, 1, 0.2); draw(ZONE_LAMP, trans(zp[0], WATER_Y + bob - 1, zp[2]), c, 0.85, 1, 0); } });
+  const prevPr = cur; use(P.inst);
+  zones.forEach(z => { const zp = z.pos, c = z.owner === 0 ? [0.35, 0.65, 1] : z.owner === 1 ? [1, 0.35, 0.28] : [0.95, 0.92, 0.85], R = z.r || 150;
+    for (let i = 0; i < 16; i++) { const a = i / 16 * Math.PI * 2, x = zp[0] + Math.sin(a) * R, zz = zp[2] + Math.cos(a) * R; if ((x - cx) ** 2 + (zz - cz) ** 2 > mD2 || !sphereVisible(F, x, 2, zz, 6)) continue; const col = i % 2 ? c : [0.95, 0.95, 0.9]; pushInst(chain(trans(x, WATER_Y - 0.4 + Math.sin(now * 1.3 + i) * 0.25, zz), rotZ(Math.sin(now + i) * 0.08)), col[0], col[1], col[2], i % 2 ? 0.5 : 0, 1); } });
+  flushInst(BUOY_MESH);
+  if (prevPr) use(prevPr);
 }
 function drawNavalFx(F) {
   gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-2, -6);
@@ -6770,13 +6865,18 @@ function navDetailMesh() {
     const n = vnorm([heightAt(x - NHC / 2, z) - heightAt(x + NHC / 2, z), NHC, heightAt(x, z - NHC / 2) - heightAt(x, z + NHC / 2)]);
     op.push(x, hh, z); on.push(...n); oc.push(...groundColor(x, z, hh, n[1]));
   }
-  const B = 4, deep = (WATER_Y ?? 0) - 3, W1 = NHN + 1; // GUE-6 round 7: the deep sea floor in 50 m blocks
+  const B = 4, deep = (WATER_Y ?? 0) - 3, sunk = WATER_Y === null ? -1e9 : WATER_Y - 4, W1 = NHN + 1; // skip cells wholly under opaque water
   const cell = (ix, iz) => { const x0 = ix * NHC - OUTER, z0 = iz * NHC - OUTER;
     if (x0 >= -HALF && x0 + NHC <= HALF && z0 >= -HALF && z0 + NHC <= HALF) return;
-    const i = iz * W1 + ix; oi.push(i, i + W1, i + 1, i + 1, i + W1, i + W1 + 1); };
+    const i = iz * W1 + ix;
+    if (NH[i] < sunk && NH[i + 1] < sunk && NH[i + W1] < sunk && NH[i + W1 + 1] < sunk) return;
+    oi.push(i, i + W1, i + 1, i + 1, i + W1, i + W1 + 1); };
   for (let bz = 0; bz < NHN; bz += B) for (let bx = 0; bx < NHN; bx += B) {
-    let flat = bx + B <= NHN && bz + B <= NHN;
-    for (let iz = bz; flat && iz <= bz + B; iz++) for (let ix = bx; ix <= bx + B; ix++) if (NH[iz * W1 + ix] > deep) { flat = false; break; }
+    let flat = bx + B <= NHN && bz + B <= NHN, allSunk = flat;
+    for (let iz = bz; flat && iz <= bz + B; iz++) for (let ix = bx; ix <= bx + B; ix++) {
+      const h = NH[iz * W1 + ix]; if (h >= sunk) allSunk = false; if (h > deep) { flat = false; break; }
+    }
+    if (allSunk) continue;
     if (flat) { const x0 = bx * NHC - OUTER, z0 = bz * NHC - OUTER, x1 = x0 + B * NHC, z1 = z0 + B * NHC;
       if (x1 > -HALF && x0 < HALF && z1 > -HALF && z0 < HALF) flat = false; } // touches the battlefield hole: per cell
     if (flat) { const i = bz * W1 + bx, j = i + B * W1; oi.push(i, j, i + B, i + B, j, j + B); continue; }
@@ -7054,6 +7154,11 @@ const puffMesh = (() => {
   addLoft(b, [ring(-0.5, 0.0005, 0), ring(-0.2, 0.47, 1), ring(0.2, 0.47, 0), ring(0.5, 0.0005, 1)], [1, 1, 1], false, false);
   return finish(b);
 })();
+const puffMeshLo = (() => {
+  const b = builder(), r = (y, rad) => [[rad, y, 0], [0, y, rad], [-rad, y, 0], [0, y, -rad]];
+  addLoft(b, [r(-0.5, 0.0005), r(0, 0.5), r(0.5, 0.0005)], [1, 1, 1], false, false);
+  return finish(b);
+})();
 const flagMesh = (() => { const b = builder(); addBox(b, chain(trans(1.6, 9, 0), scl(3, 1.8, 0.1)), [1, 1, 1]); return finish(b); })();
 
 
@@ -7143,7 +7248,55 @@ function kWindmill(b, x, z, face) {
 }
 // ---------------------------------------------------------------- world generation
 let AUTH = null; // authored crossroads pieces (pass 14): walls, gateways, farmyard polygon
-let terrainMesh = null, propsMesh = null, outerMesh = null, cloudMesh = null, roadMesh = null, vegMesh = null, waterMesh = null;
+let terrainMesh = null, propsMesh = null, propsDetMesh = null, outerMesh = null, cloudMesh = null, roadMesh = null, vegMesh = null, waterMesh = null;
+const GRID_CELL = 24;
+let BLDG_GRID = null, TREE_GRID = null, COV_GRID = null, _gridStamp = 1;
+const gridKey = (cx, cz) => ((cx + 4096) << 13) | (cz + 4096);
+function gridInsertBox(g, item, x0, z0, x1, z1) {
+  const cx0 = Math.floor(x0 / GRID_CELL), cx1 = Math.floor(x1 / GRID_CELL), cz0 = Math.floor(z0 / GRID_CELL), cz1 = Math.floor(z1 / GRID_CELL);
+  for (let cz = cz0; cz <= cz1; cz++) for (let cx = cx0; cx <= cx1; cx++) {
+    const k = gridKey(cx, cz); let b = g.get(k); if (!b) g.set(k, b = []); b.push(item);
+  }
+}
+function gridInsertPt(g, item, x, z) {
+  const k = gridKey(Math.floor(x / GRID_CELL), Math.floor(z / GRID_CELL)); let b = g.get(k); if (!b) g.set(k, b = []); b.push(item);
+}
+function gridNearRect(g, x0, z0, x1, z1, fn) {
+  if (!g) return false;
+  const cx0 = Math.floor(x0 / GRID_CELL), cx1 = Math.floor(x1 / GRID_CELL), cz0 = Math.floor(z0 / GRID_CELL), cz1 = Math.floor(z1 / GRID_CELL);
+  const st = ++_gridStamp;
+  for (let cz = cz0; cz <= cz1; cz++) for (let cx = cx0; cx <= cx1; cx++) {
+    const b = g.get(gridKey(cx, cz)); if (!b) continue;
+    for (let i = 0; i < b.length; i++) { const it = b[i]; if (it._gs === st) continue; it._gs = st; if (fn(it) === true) return true; }
+  }
+  return false;
+}
+function gridNearSeg(g, a, b, pad, fn) {
+  if (!g) return false;
+  const dx = b[0] - a[0], dz = b[2] - a[2], L = Math.hypot(dx, dz);
+  if (L < 48) return gridNearRect(g, Math.min(a[0], b[0]) - pad, Math.min(a[2], b[2]) - pad, Math.max(a[0], b[0]) + pad, Math.max(a[2], b[2]) + pad, fn);
+  const n = Math.ceil(L / GRID_CELL), st = ++_gridStamp;
+  let x0 = a[0], z0 = a[2];
+  for (let i = 1; i <= n; i++) {
+    const f = i / n, x1 = a[0] + dx * f, z1 = a[2] + dz * f;
+    const cx0 = Math.floor((Math.min(x0, x1) - pad) / GRID_CELL), cx1 = Math.floor((Math.max(x0, x1) + pad) / GRID_CELL);
+    const cz0 = Math.floor((Math.min(z0, z1) - pad) / GRID_CELL), cz1 = Math.floor((Math.max(z0, z1) + pad) / GRID_CELL);
+    for (let cz = cz0; cz <= cz1; cz++) for (let cx = cx0; cx <= cx1; cx++) {
+      const bucket = g.get(gridKey(cx, cz)); if (!bucket) continue;
+      for (let j = 0; j < bucket.length; j++) { const it = bucket[j]; if (it._gs === st) continue; it._gs = st; if (fn(it) === true) return true; }
+    }
+    x0 = x1; z0 = z1;
+  }
+  return false;
+}
+function rebuildBldgGrid() { const g = BLDG_GRID = new Map(); for (const b of buildings) gridInsertBox(g, b, b.mn[0], b.mn[2], b.mx[0], b.mx[2]); }
+function rebuildTreeGrid() { const g = TREE_GRID = new Map(); for (const tr of trees) gridInsertPt(g, tr, tr.x, tr.z); }
+function rebuildCoverGrid() { const g = COV_GRID = new Map(); for (const c of covers) if (c.state < 2 && c.mn) gridInsertBox(g, c, c.mn[0], c.mn[2], c.mx[0], c.mx[2]); }
+function rebuildStaticGrids() { rebuildBldgGrid(); rebuildTreeGrid(); rebuildCoverGrid(); }
+function covBlockedAt(x, z, pad = 0.3) {
+  if (COV_GRID) return gridNearRect(COV_GRID, x - pad, z - pad, x + pad, z + pad, c => c.state < 2 && c.mn && x > c.mn[0] - pad && x < c.mx[0] + pad && z > c.mn[2] - pad && z < c.mx[2] + pad);
+  return covers.some(c => c.state < 2 && c.mn && x > c.mn[0] - pad && x < c.mx[0] + pad && z > c.mn[2] - pad && z < c.mx[2] + pad);
+}
 // water (rivers, the lake, the sea): one flat sheet at WATER_Y over every cell that dips below it, out to the horizon
 // for the sea. Opaque, glass-like material so it catches the sun; the colour shows the depth (foam, shallows, deep).
 function waterColor(d) {
@@ -7162,14 +7315,45 @@ function buildWater() {
     idx.push(i, i + 2, i + 1, i + 1, i + 2, i + 3);
   };
   const S = CELL * 2, inner = (x, z) => W - heightAt(x, z);
-  for (let z0 = -HALF; z0 < HALF; z0 += S) for (let x0 = -HALF; x0 < HALF; x0 += S) {
-    let any = false; for (const [x, z] of [[x0, z0], [x0 + S, z0], [x0, z0 + S], [x0 + S, z0 + S], [x0 + S / 2, z0 + S / 2]]) if (heightAt(x, z) < W + 0.6) any = true;
-    if (any) quad(x0, z0, S, inner);
+  const nInner = Math.round(MAP / S);
+  const emitInner = (bx, bz, sz) => {
+    if (bx >= nInner || bz >= nInner) return;
+    if (bx + sz <= nInner && bz + sz <= nInner && sz >= 2) {
+      const x0 = -HALF + bx * S, z0 = -HALF + bz * S, cut = W - (sz >= 8 ? 4.0 : sz >= 4 ? 3.0 : 1.5);
+      let allDeep = true;
+      for (let j = 0; j <= sz && allDeep; j++) for (let i = 0; i <= sz; i++) if (heightAt(x0 + i * S, z0 + j * S) > cut) { allDeep = false; break; }
+      if (allDeep) { quad(x0, z0, S * sz, inner); return; }
+    }
+    if (sz === 1) {
+      const qx = -HALF + bx * S, qz = -HALF + bz * S;
+      let any = false; for (const [x, z] of [[qx, qz], [qx + S, qz], [qx, qz + S], [qx + S, qz + S], [qx + S / 2, qz + S / 2]]) if (heightAt(x, z) < W + 0.6) { any = true; break; }
+      if (any) quad(qx, qz, S, inner);
+      return;
+    }
+    const h = sz >> 1;
+    emitInner(bx, bz, h); emitInner(bx + h, bz, h); emitInner(bx, bz + h, h); emitInner(bx + h, bz + h, h);
+  };
+  for (let bz = 0; bz < nInner; bz += 8) for (let bx = 0; bx < nInner; bx += 8) emitInner(bx, bz, 8);
+  const doneO = new Uint8Array(ON * ON);
+  for (const [sz, cut] of [[4, W - 4.0], [2, W - 2.0]]) {
+    for (let iz = 0; iz + sz <= ON; iz++) for (let ix = 0; ix + sz <= ON; ix++) {
+      const x0 = ix * OCELL - OUTER, z0 = iz * OCELL - OUTER;
+      if (x0 + OCELL * sz > -HALF && x0 < HALF && z0 + OCELL * sz > -HALF && z0 < HALF) continue;
+      let free = true;
+      for (let dj = 0; dj < sz && free; dj++) for (let di = 0; di < sz; di++) if (doneO[(iz + dj) * ON + ix + di]) { free = false; break; }
+      if (!free) continue;
+      let allDeep = true;
+      for (let dj = 0; dj <= sz && allDeep; dj++) for (let di = 0; di <= sz; di++) if (heightAt(x0 + di * OCELL, z0 + dj * OCELL) > cut) { allDeep = false; break; }
+      if (!allDeep) continue;
+      for (let dj = 0; dj < sz; dj++) for (let di = 0; di < sz; di++) doneO[(iz + dj) * ON + ix + di] = 1;
+      quad(x0, z0, OCELL * sz, (x, z) => W - heightAt(x, z));
+    }
   }
-  for (let iz = 0; iz < ON; iz++) for (let ix = 0; ix < ON; ix++) { // the open sea beyond the map edge
+  for (let iz = 0; iz < ON; iz++) for (let ix = 0; ix < ON; ix++) {
+    if (doneO[iz * ON + ix]) continue;
     const x0 = ix * OCELL - OUTER, z0 = iz * OCELL - OUTER;
     if (x0 >= -HALF && x0 + OCELL <= HALF && z0 >= -HALF && z0 + OCELL <= HALF) continue;
-    let any = false; for (const [x, z] of [[x0, z0], [x0 + OCELL, z0], [x0, z0 + OCELL], [x0 + OCELL, z0 + OCELL]]) if (heightAt(x, z) < W + 1) any = true;
+    let any = false; for (const [x, z] of [[x0, z0], [x0 + OCELL, z0], [x0, z0 + OCELL], [x0 + OCELL, z0 + OCELL]]) if (heightAt(x, z) < W + 1) { any = true; break; }
     if (any) quad(x0, z0, OCELL, (x, z) => W - heightAt(x, z));
   }
   return idx.length ? uploadRegions(pos, nor, col, idx, mt) : null; // SAS-5 (r5): culled per region
@@ -7317,22 +7501,45 @@ function generateWorld() {
     const x = ix * CELL - HALF, z = iz * CELL - HALF, h = HM[iz * (N + 1) + ix], n = normalAt(x, z);
     pos.push(x, h, z); nor.push(...n); col.push(...groundColor(x, z, h, n[1]));
   }
-  // indices are laid out cell by cell (CG x CG map cells) so off-screen parts of the terrain can be skipped
-  // SAS-5 (r5): cells wholly 4 m or more under the (opaque, flat) water are never seen, from any camera that can be there:
-  // they are left out (in a naval battle that is most of the battlefield's sea bed: ~150k triangles a frame)
-  const tChunks = [], CN = N / CG, sunk = WATER_Y === null ? -1e9 : WATER_Y - 4;
-  for (let cz = 0; cz < CG; cz++) for (let cx = 0; cx < CG; cx++) {
-    const first = idx.length; let y0 = 1e9, y1 = -1e9;
-    for (let iz = cz * CN; iz < (cz + 1) * CN; iz++) for (let ix = cx * CN; ix < (cx + 1) * CN; ix++) {
-      const i = iz * (N + 1) + ix;
-      if (HM[i] < sunk && HM[i + 1] < sunk && HM[i + N + 1] < sunk && HM[i + N + 2] < sunk) continue;
-      idx.push(i, i + N + 1, i + 1, i + 1, i + N + 1, i + N + 2);
-      for (const j of [i, i + 1, i + N + 1, i + N + 2]) { y0 = Math.min(y0, HM[j]); y1 = Math.max(y1, HM[j]); }
+  // indices are laid out cell by cell (CG x CG map cells) in 3 LODs (5m, 10m, 20m) so distant terrain draws ~16x fewer triangles
+  const CN = N / CG, sunk = WATER_Y === null ? -1e9 : WATER_Y - 4, W1 = N + 1;
+  const skMap = new Map();
+  const skirtV = v => {
+    let sv = skMap.get(v);
+    if (sv === undefined) {
+      sv = pos.length / 3; skMap.set(v, sv);
+      pos.push(pos[v * 3], pos[v * 3 + 1] - 2.2, pos[v * 3 + 2]);
+      nor.push(nor[v * 3], nor[v * 3 + 1], nor[v * 3 + 2]);
+      col.push(col[v * 3] * 0.95, col[v * 3 + 1] * 0.95, col[v * 3 + 2] * 0.95);
     }
-    tChunks.push({ first, count: idx.length - first, mn: [cx * CS - HALF, y0, cz * CS - HALF], mx: [(cx + 1) * CS - HALF, y1, (cz + 1) * CS - HALF] });
+    return sv;
+  };
+  const lods = [[], [], [], []];
+  for (const [li, st] of [[0, 1], [1, 2], [2, 4], [3, 7]]) {
+    for (let cz = 0; cz < CG; cz++) for (let cx = 0; cx < CG; cx++) {
+      const first = idx.length; let y0 = 1e9, y1 = -1e9;
+      for (let iz = cz * CN; iz < (cz + 1) * CN; iz += st) for (let ix = cx * CN; ix < (cx + 1) * CN; ix += st) {
+        let vis = false;
+        if (st === 1) { const i = iz * W1 + ix; vis = HM[i] >= sunk || HM[i + 1] >= sunk || HM[i + W1] >= sunk || HM[i + W1 + 1] >= sunk; }
+        else { for (let dz = 0; dz <= st && !vis; dz++) for (let dx = 0; dx <= st; dx++) if (HM[(iz + dz) * W1 + ix + dx] >= sunk) { vis = true; break; } }
+        if (!vis) continue;
+        const i = iz * W1 + ix, a = i, b = i + st, c = i + st * W1, d = c + st;
+        idx.push(a, c, b, b, c, d);
+        for (const j of [a, b, c, d]) { y0 = Math.min(y0, HM[j]); y1 = Math.max(y1, HM[j]); }
+      }
+      if (idx.length > first) {
+        const x0 = cx * CN, x1 = (cx + 1) * CN, z0 = cz * CN, z1 = (cz + 1) * CN;
+        const addSk = (p0, p1) => { if (HM[p0] < sunk && HM[p1] < sunk) return; const s0 = skirtV(p0), s1 = skirtV(p1); idx.push(p0, s0, p1, p1, s0, s1); };
+        for (let ix = x0; ix < x1; ix += st) { addSk(z0 * W1 + ix, z0 * W1 + ix + st); addSk(z1 * W1 + ix, z1 * W1 + ix + st); }
+        for (let iz = z0; iz < z1; iz += st) { addSk(iz * W1 + x0, (iz + st) * W1 + x0); addSk(iz * W1 + x1, (iz + st) * W1 + x1); }
+        y0 -= 2.2;
+      }
+      lods[li].push({ first, count: idx.length - first, mn: [cx * CS - HALF, y0, cz * CS - HALF], mx: [(cx + 1) * CS - HALF, y1, (cz + 1) * CS - HALF] });
+    }
   }
   terrainMesh = uploadMesh(pos, nor, col, idx);
-  terrainMesh.chunks = tChunks.filter(c => c.count > 0);
+  terrainMesh.lods = lods;
+  terrainMesh.chunks = lods[0].filter(q => q.count > 0);
   // outer countryside so aircraft have room to manoeuvre (coarse grid, aligned with the map edge)
   for (let iz = 0; iz <= ON; iz++) for (let ix = 0; ix <= ON; ix++) {
     const x = ix * OCELL - OUTER, z = iz * OCELL - OUTER, e = Math.max(Math.abs(x), Math.abs(z)) / HALF;
@@ -7420,7 +7627,7 @@ function generateWorld() {
 
   // buildings
   buildings.length = 0; trees.length = 0;
-  const pb = builder(), rb0 = builder(); PAVED.length = 0; // rb0: authored paving, appended to the road mesh
+  const pb = builder(), pbd = builder(), rb0 = builder(); PAVED.length = 0; // pbd: fine prop details; rb0: authored paving, appended to the road mesh
   const vb = builder(); // vegetation and other visual-only scenery (no collision, no line-of-sight blocking)
   const zoneNear = (x, z, r) => ZONE_POS.some(zp => Math.hypot(zp[0] - x, zp[2] - z) < r);
   const freeSpot = (x, z, hx, hz, pad) => !buildings.some(bd => x + hx + pad > bd.mn[0] && x - hx - pad < bd.mx[0] && z + hz + pad > bd.mn[2] && z - hz - pad < bd.mx[2]);
@@ -7464,26 +7671,26 @@ function generateWorld() {
     const roofKind = barn ? "rust" : roofCol[0] < 0.4 ? "slate" : "tile", hip = !barn && l > w + 3 && Math.random() < 0.45, dmg = !barn && zoneNear(x, z, 120) && Math.random() < 0.22;
     const ridgeY = kRoof(pb, L(0, 0, 0), w, l, wallH, { col: pick(KIT[roofKind]), mat: roofKind === "rust" ? MAT.rust : roofKind === "slate" ? MAT.slate : MAT.tile, pitch: barn ? 0.8 : rand(0.62, 0.78), hip, damaged: dmg, gableCol: wallCol, gableMat: wm });
     if (!barn) for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) for (let k = 0, yq = 1.9; yq < wallH - 0.4; k++, yq += 0.52) // stone quoins
-      withMat(MAT.stone, () => { addBox(pb, chain(L(sx * (w / 2 + 0.03), yq, sz * (l / 2 - (k % 2 ? 0.25 : 0.38))), scl(0.06, 0.44, k % 2 ? 0.5 : 0.76)), STONE); addBox(pb, chain(L(sx * (w / 2 - (k % 2 ? 0.38 : 0.25)), yq, sz * (l / 2 + 0.03)), scl(k % 2 ? 0.76 : 0.5, 0.44, 0.06)), STONE); });
+      withMat(MAT.stone, () => { addBox(pbd, chain(L(sx * (w / 2 + 0.03), yq, sz * (l / 2 - (k % 2 ? 0.25 : 0.38))), scl(0.06, 0.44, k % 2 ? 0.5 : 0.76)), STONE); addBox(pbd, chain(L(sx * (w / 2 - (k % 2 ? 0.38 : 0.25)), yq, sz * (l / 2 + 0.03)), scl(k % 2 ? 0.76 : 0.5, 0.44, 0.06)), STONE); });
     if (barn) {
       addBox(pb, chain(L(0, 1 + 1.8, l / 2 + 0.03), scl(3.4, 3.6, 0.12)), [0.22, 0.16, 0.12]);
       addBeam(pb, tp(L(0, 0, 0), [-1.6, 1.1, l / 2 + 0.1]), tp(L(0, 0, 0), [1.6, 4.5, l / 2 + 0.1]), 0.18, [0.62, 0.58, 0.5]);
       addBeam(pb, tp(L(0, 0, 0), [1.6, 1.1, l / 2 + 0.1]), tp(L(0, 0, 0), [-1.6, 4.5, l / 2 + 0.1]), 0.18, [0.62, 0.58, 0.5]);
-      for (let i = 0; i < 3; i++) for (const sx of [-1, 1]) addBox(pb, chain(L(sx * (w / 2 + 0.02), wallH - 1.4, (i - 1) * l * 0.3), scl(0.06, 0.8, 1.4)), GLASS);
+      for (let i = 0; i < 3; i++) for (const sx of [-1, 1]) addBox(pbd, chain(L(sx * (w / 2 + 0.02), wallH - 1.4, (i - 1) * l * 0.3), scl(0.06, 0.8, 1.4)), GLASS);
     } else {
       // windows with frames and shutters on the long walls, upper floor on taller houses, door, chimney
       const nWin = Math.max(2, Math.floor(l / 3.2)), floors = wallH > 6 ? [2.6, wallH - 1.5] : [Math.min(2.7, wallH - 1.3)];
       const shut = pick([[0.24, 0.34, 0.24], [0.36, 0.24, 0.16], [0.3, 0.36, 0.42], null]);
       for (const fy of floors) for (let i = 0; i < nWin; i++) for (const sx of [-1, 1]) {
         const zz = (i - (nWin - 1) / 2) * (l / nWin);
-        withMat(MAT.wood, () => addBox(pb, chain(L(sx * (w / 2 + 0.03), fy, zz), scl(0.08, 1.35, 1.1)), FRAME));
-        withMat(MAT.glass, () => addBox(pb, chain(L(sx * (w / 2 + 0.06), fy, zz), scl(0.06, 1.1, 0.86)), GLASS));
-        withMat(MAT.stone, () => { addBox(pb, chain(L(sx * (w / 2 + 0.1), fy - 0.74, zz), scl(0.22, 0.1, 1.3)), STONE); addBox(pb, chain(L(sx * (w / 2 + 0.05), fy + 0.76, zz), scl(0.1, 0.18, 1.3)), STONE); });
-        if (shut) withMat(MAT.wood, () => { for (const sz of [-1, 1]) addBox(pb, chain(L(sx * (w / 2 + 0.05), fy, zz + sz * 0.8), scl(0.07, 1.3, 0.45)), shut); });
+        withMat(MAT.wood, () => addBox(pbd, chain(L(sx * (w / 2 + 0.03), fy, zz), scl(0.08, 1.35, 1.1)), FRAME));
+        withMat(MAT.glass, () => addBox(pbd, chain(L(sx * (w / 2 + 0.06), fy, zz), scl(0.06, 1.1, 0.86)), GLASS));
+        withMat(MAT.stone, () => { addBox(pbd, chain(L(sx * (w / 2 + 0.1), fy - 0.74, zz), scl(0.22, 0.1, 1.3)), STONE); addBox(pbd, chain(L(sx * (w / 2 + 0.05), fy + 0.76, zz), scl(0.1, 0.18, 1.3)), STONE); });
+        if (shut) withMat(MAT.wood, () => { for (const sz of [-1, 1]) addBox(pbd, chain(L(sx * (w / 2 + 0.05), fy, zz + sz * 0.8), scl(0.07, 1.3, 0.45)), shut); });
       }
-      withMat(MAT.wood, () => { addBox(pb, chain(L(w * 0.15, 1 + 1.15, l / 2 + 0.04), scl(1.2, 2.3, 0.12)), DOOR); addBox(pb, chain(L(w * 0.15, 1 + 2.45, l / 2 + 0.3), scl(1.7, 0.12, 0.7)), KIT.fascia); });
-      withMat(MAT.stone, () => addBox(pb, chain(L(w * 0.15, 1.62, l / 2 + 0.4), scl(1.6, 0.24, 0.8)), STONE)); // door step
-      withMat(MAT.glass, () => addBox(pb, chain(L(-w * 0.2, 1 + 2.4, l / 2 + 0.03), scl(1.0, 1.1, 0.1)), GLASS));
+      withMat(MAT.wood, () => { addBox(pbd, chain(L(w * 0.15, 1 + 1.15, l / 2 + 0.04), scl(1.2, 2.3, 0.12)), DOOR); addBox(pbd, chain(L(w * 0.15, 1 + 2.45, l / 2 + 0.3), scl(1.7, 0.12, 0.7)), KIT.fascia); });
+      withMat(MAT.stone, () => addBox(pbd, chain(L(w * 0.15, 1.62, l / 2 + 0.4), scl(1.6, 0.24, 0.8)), STONE)); // door step
+      withMat(MAT.glass, () => addBox(pbd, chain(L(-w * 0.2, 1 + 2.4, l / 2 + 0.03), scl(1.0, 1.1, 0.1)), GLASS));
       withMat(MAT.stone, () => { addBox(pb, chain(L(w * 0.22, (wallH + ridgeY) / 2 + 0.55, l * 0.28), scl(0.8, ridgeY - wallH + 1.9, 0.8)), [0.5, 0.43, 0.38]); addBox(pb, chain(L(w * 0.22, ridgeY + 1.55, l * 0.28), scl(1.0, 0.14, 1.0)), STONE); });
       if (Math.random() < 0.45) {
         // garden fence (visual)
@@ -7549,16 +7756,16 @@ function generateWorld() {
       withMat(MAT.stone, () => addBox(pb, chain(trans(x, y0 + nh / 2, z), scl(nw, nh, nl)), wc));
       const cRidge = kRoof(pb, trans(x, y0, z), nw, nl, nh, { col: KIT.slate[0], mat: MAT.slate, pitch: 0.8, gableCol: wc, gableMat: MAT.stone });
       for (let i = 0; i < 4; i++) for (const sx of [-1, 1]) {
-        addBox(pb, chain(trans(x + sx * (nw / 2 + 0.03), y0 + 5.2, z + (i - 1.5) * 4.4), scl(0.08, 3.4, 1.4)), FRAME);
-        addBox(pb, chain(trans(x + sx * (nw / 2 + 0.06), y0 + 5.2, z + (i - 1.5) * 4.4), scl(0.06, 3.0, 1.1)), [0.16, 0.18, 0.24]);
+        addBox(pbd, chain(trans(x + sx * (nw / 2 + 0.03), y0 + 5.2, z + (i - 1.5) * 4.4), scl(0.08, 3.4, 1.4)), FRAME);
+        addBox(pbd, chain(trans(x + sx * (nw / 2 + 0.06), y0 + 5.2, z + (i - 1.5) * 4.4), scl(0.06, 3.0, 1.1)), [0.16, 0.18, 0.24]);
       }
       const tz = z - nl / 2 - 2.6, th = 24;
       withMat(MAT.stone, () => addBox(pb, chain(trans(x, y0 + th / 2, tz), scl(5.4, th, 5.4)), [0.72, 0.7, 0.64]));
-      for (const [dx, dz] of [[2.72, 0], [-2.72, 0], [0, 2.72], [0, -2.72]]) addBox(pb, chain(trans(x + dx, y0 + th - 3, tz + dz), scl(dx ? 0.06 : 1.4, 2.4, dz ? 0.06 : 1.4)), CHAR);
+      for (const [dx, dz] of [[2.72, 0], [-2.72, 0], [0, 2.72], [0, -2.72]]) addBox(pbd, chain(trans(x + dx, y0 + th - 3, tz + dz), scl(dx ? 0.06 : 1.4, 2.4, dz ? 0.06 : 1.4)), CHAR);
       withMat(MAT.slate, () => addCone(pb, chain(trans(x, y0 + th, tz), rotY(Math.PI / 4), scl(7.6, 11, 7.6)), [0.26, 0.36, 0.34], 4));
-      addBox(pb, chain(trans(x, y0 + th + 11.6, tz), scl(0.15, 2.2, 0.15)), [0.2, 0.2, 0.2]);
-      addBox(pb, chain(trans(x, y0 + th + 11.9, tz), scl(1.1, 0.15, 0.15)), [0.2, 0.2, 0.2]);
-      addBox(pb, chain(trans(x, y0 + 1 + 1.6, tz - 2.73), scl(1.6, 3.2, 0.1)), DOOR);
+      addBox(pbd, chain(trans(x, y0 + th + 11.6, tz), scl(0.15, 2.2, 0.15)), [0.2, 0.2, 0.2]);
+      addBox(pbd, chain(trans(x, y0 + th + 11.9, tz), scl(1.1, 0.15, 0.15)), [0.2, 0.2, 0.2]);
+      addBox(pbd, chain(trans(x, y0 + 1 + 1.6, tz - 2.73), scl(1.6, 3.2, 0.1)), DOOR);
       buildings.push({ x, z, mn: [x - nw / 2, y0, z - nl / 2], mx: [x + nw / 2, y0 + cRidge + 0.1, z + nl / 2] });
       buildings.push({ x, z: tz, mn: [x - 2.7, y0, tz - 2.7], mx: [x + 2.7, y0 + th + 10, tz + 2.7] });
       break;
@@ -7578,7 +7785,7 @@ function generateWorld() {
   for (let i = 0; i < (MAPD.rocks ?? 170); i++) {
     const x = rand(-630, 630), z = rand(-630, 630); if (roadDist(x, z) < 8 || wet(x, z, -0.3)) continue;
     const s = rand(0.6, 1.8);
-    addBox(pb, chain(trans(x, heightAt(x, z) + 0.1, z), rotY(rand(0, 6)), rotX(rand(-0.4, 0.4)), scl(s * 1.6, s, s * 1.3)), [0.5, 0.49, 0.46]);
+    addBox(pbd, chain(trans(x, heightAt(x, z) + 0.1, z), rotY(rand(0, 6)), rotX(rand(-0.4, 0.4)), scl(s * 1.6, s, s * 1.3)), [0.5, 0.49, 0.46]);
   }
   // telegraph line beside the main roads to zone B and between the zones: poles with sagging wires
   if (MAPD.poles && ROADS.length >= 8) for (const ri of [1, 4, 6, 7]) {
@@ -7591,18 +7798,19 @@ function generateWorld() {
       addBox(pb, chain(trans(x, y + 3.6, z), rotX(lean), scl(0.24, 7.6, 0.24)), [0.31, 0.25, 0.19]);
       addBox(pb, chain(trans(x, y + 7.0, z), rotY(Math.atan2(sx, sz)), scl(1.7, 0.13, 0.13)), [0.31, 0.25, 0.19]);
       const tops = [-0.7, 0.7].map(o => [x + sx * o, y + 7.15, z + sz * o]);
-      for (const t of tops) addBox(pb, chain(trans(...t), scl(0.08, 0.16, 0.08)), [0.85, 0.85, 0.82]);
+      for (const t of tops) addBox(pbd, chain(trans(...t), scl(0.08, 0.16, 0.08)), [0.85, 0.85, 0.82]);
       if (prev) for (let k = 0; k < 2; k++) {
         const A = prev[k], B = tops[k];
         let q0 = A;
-        for (let i = 1; i <= 4; i++) { const f = i / 4, q = vlerp(A, B, f); q[1] -= Math.sin(f * Math.PI) * 0.7; addBeam(pb, q0, q, 0.035, [0.1, 0.1, 0.1]); q0 = q; }
+        for (let i = 1; i <= 4; i++) { const f = i / 4, q = vlerp(A, B, f); q[1] -= Math.sin(f * Math.PI) * 0.7; addBeam(pbd, q0, q, 0.035, [0.1, 0.1, 0.1]); q0 = q; }
       }
       prev = tops;
     }
   }
-  if (snowOn()) snowify(pb, 1.2, heightAt); // snow on roofs, wall tops and window sills (not on the ground-level clutter)
+  if (snowOn()) { snowify(pb, 1.2, heightAt); snowify(pbd, 1.2, heightAt); } // snow on roofs, wall tops and window sills (not on the ground-level clutter)
   if (MAPD.build) MAPD.build(pb, vb); // GUE-6: the naval map's sea stacks and landmarks
   propsMesh = chunkedMesh(pb);
+  propsDetMesh = pbd.pos.length ? chunkedMesh(pbd) : null;
 
   // dirt roads laid as their own strips over the terrain: shoulders, packed dirt, wheel ruts, grassy crown
   // pass 24: they were seven straight bands of constant width, the same along every metre. Now the wheel tracks wander a
@@ -7612,11 +7820,13 @@ function generateWorld() {
   // unchanged, and roadDist() (speed on roads, AI) still works from ROADS.
   const rb = builder();
   const DIRT = [0.46, 0.43, 0.3], GRASSY = [0.37, 0.42, 0.23];
-  const STRIPS = [[-3.9, -3.2, [0.40, 0.41, 0.25]], [-3.2, -2.1, [0.42, 0.41, 0.27]], [-2.1, -1.35, [0.5, 0.44, 0.33]], [-1.35, -0.75, [0.36, 0.31, 0.24], 1], [-0.75, -0.3, DIRT],
-    [-0.3, 0.3, DIRT, 0, 1], [0.3, 0.75, DIRT], [0.75, 1.35, [0.36, 0.31, 0.24], 1], [1.35, 2.1, [0.5, 0.44, 0.33]], [2.1, 3.2, [0.42, 0.41, 0.27]], [3.2, 3.9, [0.40, 0.41, 0.25]]];
+  const STRIPS = SOFTWARE_GL
+    ? [[-3.6, -1.6, [0.42, 0.41, 0.27]], [-1.6, 1.6, DIRT, 0, 1], [1.6, 3.6, [0.42, 0.41, 0.27]]]
+    : [[-3.9, -3.2, [0.40, 0.41, 0.25]], [-3.2, -2.1, [0.42, 0.41, 0.27]], [-2.1, -1.35, [0.5, 0.44, 0.33]], [-1.35, -0.75, [0.36, 0.31, 0.24], 1], [-0.75, -0.3, DIRT],
+      [-0.3, 0.3, DIRT, 0, 1], [0.3, 0.75, DIRT], [0.75, 1.35, [0.36, 0.31, 0.24], 1], [1.35, 2.1, [0.5, 0.44, 0.33]], [2.1, 3.2, [0.42, 0.41, 0.27]], [3.2, 3.9, [0.40, 0.41, 0.25]]];
   CURMAT = [MAT.soil, 0.2, 0, 0];
   ROADS.forEach(([ra, rbp], ri) => {
-    const dx = rbp[0] - ra[0], dz = rbp[2] - ra[2], len = Math.hypot(dx, dz), sx = dz / len, sz = -dx / len, n = Math.ceil(len / 3), lift = 0.07 + ri * 0.012;
+    const dx = rbp[0] - ra[0], dz = rbp[2] - ra[2], len = Math.hypot(dx, dz), sx = dz / len, sz = -dx / len, n = Math.ceil(len / (SOFTWARE_GL ? 9 : 3)), lift = 0.07 + ri * 0.012;
     const wander = j => { const d = j / n * len; return (0.28 * Math.sin(d * 0.041 + ri * 1.7) + 0.12 * Math.sin(d * 0.117 + ri * 0.6)) * smoothstep(0, 24, d) * smoothstep(0, 24, len - d); };
     const off = (j, o) => { const a = Math.abs(o), w = wander(j);
       if (a <= 2.1) return o + w;
@@ -7632,7 +7842,7 @@ function generateWorld() {
         const rc = MAPD.roadTint ? MAPD.roadTint(col, Math.abs(o0 + o1) / 2) : col; // snow slush, desert sand, frozen ruts
         addPoly(rb, q, [rc[0] * k, rc[1] * k, rc[2] * k], vsub(centroid(q), [0, 5, 0]));
       }
-      for (const sd of [-1, 1]) if (hash(i, ri * 5 + (sd > 0 ? 1 : 0), seed + 3) < 0.07) { // a puddle in the rut
+      if (!SOFTWARE_GL) for (const sd of [-1, 1]) if (hash(i, ri * 5 + (sd > 0 ? 1 : 0), seed + 3) < 0.07) { // a puddle in the rut
         const L0 = 0.5 + hash(i, ri, seed + 4) * 0.8, ring = [];
         for (let a = 0; a < 8; a++) { const t = a / 8 * Math.PI * 2, f = i + 0.5 + Math.cos(t) * L0 / 3, o = sd * 1.05 + Math.sin(t) * 0.27;
           const j0 = Math.floor(f), fr = f - j0, A = P(j0, o, -0.022), B = P(j0 + 1, o, -0.022); ring.push(vlerp(A, B, fr)); }
@@ -7759,14 +7969,20 @@ function generateWorld() {
   for (const t of trees) { const [mx, my] = toMap(t.x, t.z); mc.fillRect(mx - 1, my - 1, 2, 2); }
   mc.fillStyle = "#555";
   for (const b of buildings) { const [x0, y0] = toMap(b.mx[0], b.mx[2]), [x1, y1] = toMap(b.mn[0], b.mn[2]); mc.fillRect(x0, y0, x1 - x0, y1 - y0); }
+  rebuildStaticGrids();
 }
 function toMap(x, z) { return [(MM_EXT / 2 - x) / MM_EXT * 220, (MM_EXT / 2 - z) / MM_EXT * 220]; }
 
 // line of sight (terrain + buildings)
 function los(a, b) {
-  const d = vsub(b, a), L = vlen(d), n = Math.ceil(L / 5);
-  for (let i = 1; i < n; i++) { const p = vadd(a, vscale(d, i / n)); if (p[1] < heightAt(p[0], p[2]) + 0.2) return false; }
-  for (const bd of buildings) if (segAABB(a, b, bd.mn, bd.mx)) return false;
+  const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2], L = Math.hypot(dx, dy, dz), n = Math.ceil(L / 5);
+  for (let i = 1; i < n; i++) {
+    const f = i / n;
+    if (a[1] + dy * f < heightAt(a[0] + dx * f, a[2] + dz * f) + 0.2) return false;
+  }
+  const hitB = BLDG_GRID ? gridNearSeg(BLDG_GRID, a, b, 0.2, bd => !!segAABB(a, b, bd.mn, bd.mx))
+    : buildings.some(bd => segAABB(a, b, bd.mn, bd.mx));
+  if (hitB) return false;
   for (const s of smokes) if (s.r > 2 && segSphere(a, b, s.p, s.r)) return false; // smoke screens block sight
   return true;
 }
@@ -7793,7 +8009,7 @@ function spawnTank(t) {
   t.rockets = t.type.rockets ? t.type.rockets.n : 0; t.rocketT = 0; t.rockRel = 0; t.lock = null; t.lockT = 0;
   setupCrew(t); t.extT = 0; if (!AMMO[t.ammo]) t.ammo = t.ai ? "aphe" : "ap"; t.loaded = t.ammo; // the player keeps their last shell choice across respawns
   if (t.type.air) spawnPlane(t);
-  if (t.ai) { t.ai.target = null; t.ai.goal = null; t.ai.rev = 0; t.ai.stuck = 0; t.ai.fireDelay = 1.5; t.ai.pref = ZONE_POS.map(() => rand(0, 250)); t.ai.coverT = 0; if (t.ai.nav) t.ai.nav.path = null; }
+  if (t.ai) { t.ai.think = 0; t.ai.target = null; t.ai.goal = null; t.ai.rev = 0; t.ai.stuck = 0; t.ai.fireDelay = 1.5; t.ai.pref = ZONE_POS.map(() => rand(0, 250)); t.ai.coverT = 0; if (t.ai.nav) t.ai.nav.path = null; }
   void dir;
   if (M.op && OPL && NAV.base && t.team === 0 && !t.type.air) opPlace(t, t.pos); // never respawn inside a wall
   t.boat = null;
@@ -7902,7 +8118,7 @@ function collideTank(t) {
       t.speed *= 0.92;
     }
   }
-  for (const b of buildings) {
+  const hitBd = b => {
     const cx = clamp(p[0], b.mn[0], b.mx[0]), cz = clamp(p[2], b.mn[2], b.mx[2]);
     let dx = p[0] - cx, dz = p[2] - cz, d = Math.hypot(dx, dz);
     if (d < r) {
@@ -7910,12 +8126,16 @@ function collideTank(t) {
       else { p[0] += dx / d * (r - d); p[2] += dz / d * (r - d); }
       t.speed *= 0.6;
     }
-  }
-  for (const tr of trees) {
-    if (tr.falling) continue;
+  };
+  if (BLDG_GRID) gridNearRect(BLDG_GRID, p[0] - r - 0.5, p[2] - r - 0.5, p[0] + r + 0.5, p[2] + r + 0.5, hitBd);
+  else for (const b of buildings) hitBd(b);
+  const hitTr = tr => {
+    if (tr.falling) return;
     const dx = tr.x - p[0], dz = tr.z - p[2];
     if (dx * dx + dz * dz < (r + 0.5) * (r + 0.5)) { tr.falling = true; tr.dir = Math.atan2(dx, dz); t.speed *= 0.85; if (t.isPlayer) sfxCrack(); }
-  }
+  };
+  if (TREE_GRID) gridNearRect(TREE_GRID, p[0] - r - 1.5, p[2] - r - 1.5, p[0] + r + 1.5, p[2] + r + 1.5, hitTr);
+  else for (const tr of trees) hitTr(tr);
   p[0] = clamp(p[0], -BOUND, BOUND); p[2] = clamp(p[2], -BOUND, BOUND);
 }
 // returns {turnErr} — how far the gun is from the requested aim
@@ -8147,7 +8367,7 @@ function drawEnemyCues(W, H) {
   const labels = [];
   // pass 29 (audit round 5): while a centre title / message is up, range labels that fall inside its band are dropped (the
   // marker triangles stay), so at short windows (1280×600) "1178 m" no longer prints through the BREAKTHROUGH title
-  const ce = $("center"), cr = centerTimer > 0 && ce.textContent ? ce.getBoundingClientRect() : null;
+  const cr = getCenterRect();
   for (const { e, d } of list) {
     const top = e.type.air ? vadd(e.pos, [0, 3, 0]) : vadd(e.pos, vscale(e.Y, e.type.hullTop + 2.4));
     const s = project(top), m = 30, sy = s && Math.max(s[1], hudTop() + 26); // markers never sit under the top score bar or the compass (pass 21: their range label neither)
@@ -8269,21 +8489,22 @@ function trace(a, b, ignore, inf = false, ignore2 = null) {
     }
   }
   const lowY = Math.min(a[1], b[1]);
-  for (const bd of buildings) {
-    if (lowY > bd.mx[1]) continue;
-    const h = segAABB(a, b, bd.mn, bd.mx);
-    if (h && (!best || h.t < best.t)) best = { t: h.t, kind: "building", bd };
-  }
-  const n = lowY > (Math.abs(a[0]) > OUTER - 400 || Math.abs(a[2]) > OUTER - 400 ? FAR_MAX : TERRAIN_MAX) ? 0 : Math.max(2, Math.ceil(half)); // far mountains are taller than the battlefield
-  for (let i = 1; i <= n; i++) {
-    const f = i / n;
-    if (best && f > best.t) break;
-    const q = vlerp(a, b, f);
-    if (q[1] < surfAt(q[0], q[2])) { // shells stop at the water surface (a splash) as they do at the ground
-      let lo = (i - 1) / n, hi = f;
-      for (let k = 0; k < 7; k++) { const m = (lo + hi) / 2, p = vlerp(a, b, m); if (p[1] < surfAt(p[0], p[2])) hi = m; else lo = m; }
-      best = { t: hi, kind: "ground" };
-      break;
+  const checkBd = bd => { if (lowY > bd.mx[1]) return; const h = segAABB(a, b, bd.mn, bd.mx); if (h && (!best || h.t < best.t)) best = { t: h.t, kind: "building", bd }; };
+  if (BLDG_GRID) gridNearSeg(BLDG_GRID, a, b, 0.2, checkBd);
+  else for (const bd of buildings) checkBd(bd);
+  const maxH = Math.abs(a[0]) > OUTER - 400 || Math.abs(a[2]) > OUTER - 400 ? FAR_MAX : TERRAIN_MAX;
+  const n = lowY > maxH ? 0 : Math.max(2, Math.ceil(half));
+  if (n > 0) {
+    const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+    for (let i = 1; i <= n; i++) {
+      const f = i / n;
+      if (best && f > best.t) break;
+      if (a[1] + dy * f < surfAt(a[0] + dx * f, a[2] + dz * f)) {
+        let lo = (i - 1) / n, hi = f;
+        for (let k = 0; k < 7; k++) { const m = (lo + hi) * 0.5; if (a[1] + dy * m < surfAt(a[0] + dx * m, a[2] + dz * m)) hi = m; else lo = m; }
+        best = { t: hi, kind: "ground" };
+        break;
+      }
     }
   }
   if (best) best.p = vlerp(a, b, best.t);
@@ -8431,7 +8652,8 @@ function puff(p, v, col, life, size, grav = 0, emis = 0, grow = 0, alpha = 1) {
 }
 function updateParticles(dt) {
   // over the preset's budget the oldest puffs go first (one splice instead of a shift per new puff)
-  if (parts.length > Q.partCap) parts.splice(0, parts.length - Q.partCap);
+  const pcap = SOFTWARE_GL ? Math.min(Q.partCap, 85) : Q.partCap;
+  if (parts.length > pcap) parts.splice(0, parts.length - pcap);
   let w = 0;
   for (let i = 0; i < parts.length; i++) {
     const q = parts[i];
@@ -9810,17 +10032,20 @@ function drawDdayDecor(F) {
   const hull = [0.52, 0.57, 0.57], dark = [0.4, 0.43, 0.42];
   for (const b of boats) {
     if (F && !sphereVisible(F, b.x, b.y + 1, b.z, 12)) continue;
+    const closeB = !SOFTWARE_GL || Math.hypot(b.x - cam.pos[0], b.z - cam.pos[2]) < 95;
     const roll = b.state === "sail" || b.state === "back" ? Math.sin(now * 1.3 + b.ph) * 0.025 : 0, pitch = b.state === "sail" ? Math.sin(now * 1.7 + b.ph) * 0.02 : 0;
     const B = chain(trans(b.x, b.y, b.z), rotZ(roll), rotX(pitch)), L = BOAT.L, W = BOAT.W, dk = BOAT.deck;
     draw(lcvpMesh, B, [1, 1, 1], 0, 1, 0.3);                                                                         // the lofted hull
     draw(cubeMesh, chain(B, trans(0, dk + 0.02, 0), scl(W - 0.6, 0.06, L - 0.4)), [0.47, 0.49, 0.47], 0, 1, 0);  // deck (lighter steel, so the tank reads against it)
-    for (let r = -2; r <= 2; r++) draw(cubeMesh, chain(B, trans(0, dk + 0.07, r * 2.6), scl(W - 0.7, 0.05, 0.14)), [0.38, 0.40, 0.39], 0, 1, 0); // deck cleats
+    if (closeB) for (let r = -2; r <= 2; r++) draw(cubeMesh, chain(B, trans(0, dk + 0.07, r * 2.6), scl(W - 0.7, 0.05, 0.14)), [0.38, 0.40, 0.39], 0, 1, 0); // deck cleats
     for (const sx of [-1, 1]) {
       draw(cubeMesh, chain(B, trans(sx * (W / 2 + 0.06), dk + 1.52, 0), scl(0.18, 0.12, L - 0.6)), [0.62, 0.66, 0.66], 0, 1, 0); // rub rail on the gunwale
-      for (let r = -3; r <= 3; r++) draw(cubeMesh, chain(B, trans(sx * (W / 2 - 0.34), dk + 0.75, r * 2), scl(0.1, 1.4, 0.16)), [0.42, 0.45, 0.45], 0, 1, 0); // inner frames
-      draw(cubeMesh, chain(B, trans(sx * (W / 2 + 0.05), dk + 0.9, -L / 2 + 3.2), scl(0.04, 0.8, 1.6)), [0.92, 0.92, 0.88], 0, 1, 0); // hull number panel
-      draw(cubeMesh, chain(B, trans(sx * 1.6, dk + 2.25, -L / 2 + 1.3), scl(0.12, 0.7, 0.12)), [0.2, 0.2, 0.2], 0, 1, 0); // .30 cal gun mounts aft
-      draw(cubeMesh, chain(B, trans(sx * 1.6, dk + 2.6, -L / 2 + 1.7), scl(0.08, 0.08, 1.0)), [0.15, 0.15, 0.15], 0, 1, 0);
+      if (closeB) {
+        for (let r = -3; r <= 3; r++) draw(cubeMesh, chain(B, trans(sx * (W / 2 - 0.34), dk + 0.75, r * 2), scl(0.1, 1.4, 0.16)), [0.42, 0.45, 0.45], 0, 1, 0); // inner frames
+        draw(cubeMesh, chain(B, trans(sx * (W / 2 + 0.05), dk + 0.9, -L / 2 + 3.2), scl(0.04, 0.8, 1.6)), [0.92, 0.92, 0.88], 0, 1, 0); // hull number panel
+        draw(cubeMesh, chain(B, trans(sx * 1.6, dk + 2.25, -L / 2 + 1.3), scl(0.12, 0.7, 0.12)), [0.2, 0.2, 0.2], 0, 1, 0); // .30 cal gun mounts aft
+        draw(cubeMesh, chain(B, trans(sx * 1.6, dk + 2.6, -L / 2 + 1.7), scl(0.08, 0.08, 1.0)), [0.15, 0.15, 0.15], 0, 1, 0);
+      }
     }
     for (const sx of [-1, 1]) draw(cubeMesh, chain(B, trans(sx * (W / 2 - 0.15), dk + 0.75, 0), scl(0.3, 1.5, L - 0.4)), hull.map(v => v * 0.92), 0, 1, 0); // side walls (inside)
     draw(cubeMesh, chain(B, trans(0, dk + 1.1, -L / 2 + 0.9), scl(W - 0.2, 2.2, 1.8)), hull.map(v => v * 0.95), 0, 1, 0); // stern and coxswain's well
@@ -9830,7 +10055,7 @@ function drawDdayDecor(F) {
     const drop = b.y + dk - heightAt(b.x, b.z + L / 2 + BOAT.rampL), down = Math.atan2(Math.max(0.2, drop), BOAT.rampL), a = lerp(-Math.PI / 2 + 0.08, down, b.ramp);
     const R = chain(B, trans(0, dk, L / 2), rotX(a));
     draw(cubeMesh, chain(R, trans(0, 0, BOAT.rampL / 2), scl(W - 0.5, 0.22, BOAT.rampL)), hull.map(v => v * 1.05), 0, 1, 0); // the bow ramp
-    for (let r = 1; r <= 4; r++) draw(cubeMesh, chain(R, trans(0, 0.14, r * BOAT.rampL / 5), scl(W - 0.9, 0.08, 0.12)), [0.4, 0.43, 0.43], 0, 1, 0); // ramp cleats
+    if (closeB) for (let r = 1; r <= 4; r++) draw(cubeMesh, chain(R, trans(0, 0.14, r * BOAT.rampL / 5), scl(W - 0.9, 0.08, 0.12)), [0.4, 0.43, 0.43], 0, 1, 0); // ramp cleats
     for (const sx of [-1, 1]) draw(cubeMesh, chain(R, trans(sx * (W / 2 - 0.3), 0.25, BOAT.rampL / 2), scl(0.12, 0.4, BOAT.rampL)), hull.map(v => v * 0.9), 0, 1, 0); // ramp edge rails
   }
   const flash = ms.dd ? clamp(1 - (now - (ms.dd.flashT ?? -9)) / 0.35, 0, 1) : 0;
@@ -10080,8 +10305,8 @@ function infStep(dt) {
   if (IM.step) IM.step(dt);
   if (!INF.length) return;
   const dday = M.key === "dday", hf = sbHoldFire();
-  const allies = [], foes = [], grid = new Map(), cell = (x, z) => `${Math.floor(x / 4)},${Math.floor(z / 4)}`;
-  for (const s of INF) if (!s.dead && s.st !== "boat" && s.st !== "gone") { (s.team ? foes : allies).push(s); const k = cell(s.p[0], s.p[2]); (grid.get(k) || grid.set(k, []).get(k)).push(s); }
+  const allies = [], foes = [], grid = new Map(), igk = (cx, cz) => ((cx + 4096) << 13) | (cz + 4096);
+  for (const s of INF) if (!s.dead && s.st !== "boat" && s.st !== "gone") { (s.team ? foes : allies).push(s); const k = igk(Math.floor(s.p[0] / 4), Math.floor(s.p[2] / 4)); let b = grid.get(k); if (!b) grid.set(k, b = []); b.push(s); }
   const armour = tanks.filter(t => t.alive && !t.type.air), solid = tanks.filter(t => vehSolid(t, null)); // solid: live and wrecked hulls (pass 45)
   for (let i = INF.length - 1; i >= 0; i--) {
     const s = INF[i];
@@ -10110,9 +10335,10 @@ function infStep(dt) {
     if (s.cool <= 0 && s.st !== "flee" && !hf) {
       s.cool = irand(...(s.team ? IFC.foeCool : IFC.cool)) * (s.mg ? 0.35 : 1);
       const pool = s.team ? allies : foes, R = s.team ? IFC.foeR : IFC.allyR;
-      let best = null, bd = R;
-      for (const e of pool) { const dd = Math.hypot(e.p[0] - s.p[0], e.p[2] - s.p[2]); if (dd < bd) { bd = dd; best = e; } }
+      let best = null, bd2 = R * R;
+      for (const e of pool) { const dx = e.p[0] - s.p[0], dz = e.p[2] - s.p[2], d2 = dx * dx + dz * dz; if (d2 < bd2) { bd2 = d2; best = e; } }
       if (best && infLos(s.p, best.p)) {
+        const bd = Math.sqrt(bd2);
         s.aim = best; s.yaw = Math.atan2(best.p[0] - s.p[0], best.p[2] - s.p[2]);
         const cov = best.st === "cover" || best.st === "post" || best.st === "hold" ? 0.42 : 1, k = (s.team ? IFC.foeHit : IFC.allyHit) * (1 - bd / (R + 40)) * cov * (s.mg ? 0.6 : 1) * (IM.hitK || 1);
         const hit = Math.random() < k; infShoot(s, best.p, hit, s.mg); if (hit) infKill(best, best.pl ? s : null, best.pl ? (s.mg ? 11 : 17) : undefined); // GUE-7: a rifle or MG hit on you is damage, not a kill
@@ -10126,12 +10352,12 @@ function infStep(dt) {
     // keep apart: soldiers push away from each other (same side) and from tanks, at rest as well as on the move
     let px = 0, pz = 0;
     const gx0 = Math.floor(s.p[0] / 4), gz0 = Math.floor(s.p[2] / 4);
-    for (let ox = -1; ox <= 1; ox++) for (let oz = -1; oz <= 1; oz++) { const L = grid.get(`${gx0 + ox},${gz0 + oz}`); if (L) for (const o of L) {
+    for (let ox = -1; ox <= 1; ox++) for (let oz = -1; oz <= 1; oz++) { const L = grid.get(igk(gx0 + ox, gz0 + oz)); if (L) for (const o of L) {
       if (o === s || o.team !== s.team) continue; const dx = s.p[0] - o.p[0], dz = s.p[2] - o.p[2], dd = Math.hypot(dx, dz);
       if (dd < IFC.sep && dd > 1e-3) { const k = (IFC.sep - dd) / IFC.sep; px += dx / dd * k; pz += dz / dd * k; } else if (dd <= 1e-3) { px += Math.sin(s.ang); pz += Math.cos(s.ang); } } }
     for (const t of armour) { const dx = s.p[0] - t.pos[0], dz = s.p[2] - t.pos[2], dd = Math.hypot(dx, dz); if (dd < 6 && dd > 1e-3) { const k = (6 - dd) / 6 * 1.6; px += dx / dd * k; pz += dz / dd * k; } }
     const sepV = s.st === "post" ? 0 : 1.6;
-    if (sepV && (px || pz)) { const nx = s.p[0] + px * sepV * dt, nz = s.p[2] + pz * sepV * dt; if (!covers.some(c => c.state < 2 && nx > c.mn[0] - 0.3 && nx < c.mx[0] + 0.3 && nz > c.mn[2] - 0.3 && nz < c.mx[2] + 0.3)) s.p = [nx, Math.max(heightAt(nx, nz), deckAt(nx, nz)), nz]; }
+    if (sepV && (px || pz)) { const nx = s.p[0] + px * sepV * dt, nz = s.p[2] + pz * sepV * dt; if (!covBlockedAt(nx, nz, 0.3)) s.p = [nx, Math.max(heightAt(nx, nz), deckAt(nx, nz)), nz]; }
     if (solid.length) infVehResolve(s, solid, dt); // pass 45: hulls are solid for AI soldiers too (was the soft 6 m push only)
     // move
     if (s.wait > 0) { s.wait -= dt; s.moving = false; continue; }
@@ -10149,7 +10375,7 @@ function infStep(dt) {
     if (!dday && s.st !== "flee" && waterDepth(s.p[0] + gx / gd * 3, s.p[2] + gz / gd * 3) > WADE_MAX) { s.goal = [s.p[0] - gx / gd * 5 + s.lane * 8, s.p[2] - gz / gd * 5]; continue; } // too deep to wade: back off
     const v = (wd > 0.25 ? IFC.wade : IFC.run) * (s.st === "flee" ? 1.15 : 1) * clamp(1 - slope * 2.2, 0.35, 1);
     let nx = s.p[0] + gx / gd * v * dt, nz = s.p[2] + gz / gd * v * dt;
-    const inside = (x, z) => covers.some(c => c.state < 2 && x > c.mn[0] - 0.3 && x < c.mx[0] + 0.3 && z > c.mn[2] - 0.3 && z < c.mx[2] + 0.3);
+    const inside = (x, z) => covBlockedAt(x, z, 0.3);
     if (inside(nx, nz)) { if (!inside(nx, s.p[2])) nz = s.p[2]; else if (!inside(s.p[0], nz)) nx = s.p[0]; else { nx = s.p[0] + (s.ph > 3 ? 1 : -1) * v * dt; nz = s.p[2]; } } // walk round the obstacle
     s.p = [nx, Math.max(heightAt(nx, nz), deckAt(nx, nz)), nz]; s.yaw = Math.atan2(gx, gz); s.moving = true; s.crouch = 0.15; s.ph += dt * v * 2.6;
     if (solid.length) infVehResolve(s, solid, dt, [gx / gd, gz / gd]);
@@ -10181,7 +10407,7 @@ function infSpread(team) {
 // hit. How many, and how far, follows the graphics preset; everyone else keeps the light instanced figure. Pure
 // presentation: it reads the soldiers' state and never draws from Math.random, so battles and maps stay reproducible.
 let INF_NEAR = [];
-const INF_NEAR_N = () => Q.partCap >= 1200 ? 10 : Q.partCap >= 900 ? 6 : 3, INF_NEAR_R = () => Q.partCap >= 1200 ? 42 : Q.partCap >= 900 ? 32 : 22;
+const INF_NEAR_N = () => SOFTWARE_GL ? 1 : Q.partCap >= 1200 ? 10 : Q.partCap >= 900 ? 6 : 3, INF_NEAR_R = () => SOFTWARE_GL ? 18 : Q.partCap >= 1200 ? 42 : Q.partCap >= 900 ? 32 : 22;
 const INF_KIT = { 0: { rifle: "rifle", smg: "smg", mg: "lmg", at: "at" }, 1: { rifle: "k98", smg: "mp40", mg: "mg42", at: "pschreck" } };
 // pass 37: no pop between the two looks. A middle band (the next 8 / 16 / 24 soldiers out to 60 / 80 / 100 m) runs the
 // same rig and draws the same part meshes, instanced (one draw per part mesh for all of them), so the switch to the
@@ -10189,7 +10415,7 @@ const INF_KIT = { 0: { rifle: "rifle", smg: "smg", mg: "lmg", at: "at" }, 1: { r
 // tall. Hysteresis: a soldier already in a band keeps it until he is 4 m (detailed) / 8 m (middle) past its edge, and
 // is ranked 3 m closer than he is, so two soldiers at similar range no longer swap looks every frame.
 let INF_MID = [];
-const INF_MID_N = () => Q.partCap >= 1200 ? 24 : Q.partCap >= 900 ? 16 : 8, INF_MID_R = () => Q.partCap >= 1200 ? 100 : Q.partCap >= 900 ? 80 : 60;
+const INF_MID_N = () => SOFTWARE_GL ? 2 : Q.partCap >= 1200 ? 24 : Q.partCap >= 900 ? 16 : 8, INF_MID_R = () => SOFTWARE_GL ? 55 : Q.partCap >= 1200 ? 100 : Q.partCap >= 900 ? 80 : 60;
 function infNearPick(dt) {
   INF_NEAR = []; INF_MID = []; if (!INF.length || state === "menu") return;
   const cx = cam.pos[0], cy = cam.pos[1], cz = cam.pos[2], R = INF_NEAR_R(), RM = INF_MID_R(), L = [], pf = frameId - 1;
@@ -10211,12 +10437,20 @@ function infNearPick(dt) {
 // the middle band: every part of every soldier gathered by mesh, then one instanced draw per mesh (main and shadow pass)
 // SAS-5: and the detailed (near) band with it: the same part meshes, so one instanced draw per mesh now covers every
 // AI soldier in both bands (it was ~18 separate draws per near soldier, each with its own uniform uploads, per pass)
-function infBatch(list) {
-  const by = new Map(), sink = (mesh, M, tint, emis) => { let a = by.get(mesh); if (!a) by.set(mesh, a = []); a.push(M, tint, emis); };
-  for (const s of list) if (s.rig && s.rig.rigR) footDrawRig(s.rig, s.rig.F, s.rig.rigR, false, sink);
+function infBatch(list, lo = false, sharedBy = null) {
+  const by = sharedBy || new Map(), sink = (mesh, M, tint, emis) => { let a = by.get(mesh); if (!a) by.set(mesh, a = []); a.push(M, tint, emis); };
+  for (const s of list) if (s.rig && s.rig.rigR) footDrawRig(s.rig, s.rig.F, s.rig.rigR, false, sink, lo);
   for (const [mesh, a] of by) { for (let i = 0; i < a.length; i += 3) pushInst(a[i], a[i + 1][0], a[i + 1][1], a[i + 1][2], a[i + 2], 1); flushInst(mesh); }
 }
-function drawInfantryMid() { if (INF_NEAR.length || INF_MID.length) infBatch(INF_NEAR.length ? INF_NEAR.concat(INF_MID) : INF_MID); }
+function drawInfantryMid(sharedBy = null) {
+  if (SOFTWARE_GL) {
+    const list = INF_NEAR.length ? (INF_MID.length ? INF_NEAR.concat(INF_MID) : INF_NEAR) : INF_MID;
+    if (list.length || (sharedBy && sharedBy.size)) infBatch(list, true, sharedBy);
+    return;
+  }
+  if (INF_NEAR.length) infBatch(INF_NEAR, false);
+  if (INF_MID.length) infBatch(INF_MID, true);
+}
 function infNearAnim(s, dt) {
   let q = s.rig;
   if (!q) { const kind = s.at ? "at" : s.mg ? "mg" : ((s.ang * 7.3) % 1) < 0.28 ? "smg" : "rifle", role = { at: "at", mg: "mg", smg: "assault", rifle: "rifle" }[kind];
@@ -10248,7 +10482,7 @@ function infNearAnim(s, dt) {
 // is a few texels of the shadow map, but each one still cost ~18 draws and ~5k triangles a second time per frame)
 function drawInfantryNear() { // main pass: drawn with the middle band (drawInfantryMid); shadow pass: the ones within 18 m, instanced
   if (!shadowPass || !INF_NEAR.length) return; const cx = cam.pos[0], cz = cam.pos[2], L = INF_NEAR.filter(s => (s.p[0] - cx) ** 2 + (s.p[2] - cz) ** 2 < 324); if (!L.length) return;
-  const prev = cur; use(depthProgI); infBatch(L); if (prev) use(prev); }
+  const prev = cur; use(depthProgI); infBatch(L, SOFTWARE_GL); if (prev) use(prev); }
 // pass 51: the far figure (past the detailed and middle bands) is built to the detailed rig's measurements and kit, so
 // the hand-over reads as a change of detail, not of soldier: the rig's heights (hips 0.94 m, shoulders 1.53 m, head
 // 1.67 m; kneeling hips 0.53 m), its chest turned 0.36 rad (0.52 aimed) right of the aim, the low-ready carry and the
@@ -10261,7 +10495,7 @@ let INF_FARC = null; const infFarCols = () => INF_FARC || (INF_FARC = [FTC, FTC_
 const INF_FAR_WK = { rifle: 1, carbine: 1, k98: 1, lmg: 1, smg: 0, mp40: 0, mg42: 0, at: 2, pschreck: 2, rkt: 2 }; // 1: wooden stock, 0: steel, 2: rocket tube
 const IFV = { A: [0, 0, 0], B: [0, 0, 0], X: [0, 0, 0], Y: [0, 0, 0], Z: [0, 0, 0], m: [0, 0, 0] };
 function infFarFigure(s, ddz) {
-  const C = infFarCols()[s.team ? 1 : 0], de = s.team === 1, p = s.p, c = Math.cos(s.yaw), sn = Math.sin(s.yaw), dead = !!s.dead, dk = dead ? 0.72 : 1, lite = ddz > 230;
+  const C = infFarCols()[s.team ? 1 : 0], de = s.team === 1, p = s.p, c = Math.cos(s.yaw), sn = Math.sin(s.yaw), dead = !!s.dead, dk = dead ? 0.72 : 1, lite = ddz > (SOFTWARE_GL ? 105 : 230);
   const kind = s.at ? "at" : s.mg ? "mg" : ((s.ang * 7.3) % 1) < 0.28 ? "smg" : "rifle", wk = INF_KIT[de ? 1 : 0][kind], WP = W_PTS[wk];
   const kneel = !dead && (s.crouch > 0.5 || s.st === "boat") ? 1 : 0, aim = !dead && (s.aimT > 0 || (s.aim && !s.moving) || now - (s.shotT ?? -9) < 1.6) ? 1 : 0;
   const tube = INF_FAR_WK[wk] === 2, blade = tube ? 0.1 : aim ? 0.52 : 0.36;
@@ -10332,10 +10566,10 @@ function infFarFigure(s, ddz) {
   void st;
 }
 function drawInfantry(F) {
-  const cx = cam.pos[0], cz = cam.pos[2], zk = clamp(Math.tan((cam.fov || 1.1) / 2) / Math.tan(0.55), 0.12, 1); // pass 51: on-screen size, as infNearPick
+  const cx = cam.pos[0], cz = cam.pos[2], zk = clamp(Math.tan((cam.fov || 1.1) / 2) / Math.tan(0.55), 0.12, 1), maxR = SOFTWARE_GL ? 360 : 520; // pass 51: on-screen size, as infNearPick
   for (const s of INF) {
     if (s.st === "gone" || s.pl || s.nearF === frameId || s.midF === frameId) continue; // pass 37: or the middle band; GUE-7: the player soldier has his own detailed model; GUE-5: so do the nearest AI soldiers
-    const p = s.p, dd = Math.hypot(p[0] - cx, p[2] - cz); if (dd * zk > 520 || (F && !sphereVisible(F, p[0], p[1] + 1, p[2], 1.5))) continue;
+    const p = s.p, dd = Math.hypot(p[0] - cx, p[2] - cz); if (dd * zk > maxR || (F && !sphereVisible(F, p[0], p[1] + 1, p[2], 1.5))) continue;
     infFarFigure(s, dd * zk);
   }
   if (M.key !== "dday") for (const s of INF) { // a sandbagged scrape at every dug-in position (decoration: no collision)
@@ -10524,15 +10758,20 @@ function opCoversSetup() {
   // the sandbox keeps whatever cover the loaded map was built with (the Operation's walls, the D-Day beach, the depot)
   const list = M.sandbox ? (OPL ? OPL.covers : DDL ? DDL.covers : SKL ? SKL.covers : MAPL ? MAPL.covers : null)
     : M.op && OPL ? OPL.covers : M.key === "dday" && DDL ? DDL.covers : M.key === "strike" && SKL ? SKL.covers : MAPL ? MAPL.covers : null;
-  if (!list) return;
-  for (const s of list) addCover(s);
+  if (!list) { rebuildBldgGrid(); rebuildCoverGrid(); return; }
+  for (const s of list) addCover(s, true);
+  rebuildBldgGrid(); rebuildCoverGrid();
 }
 // one piece of destructible cover in play (also a building for collisions and sight, and blocked on the nav grid)
-function addCover(s) {
+function addCover(s, skipGrid = false) {
   const y0 = Math.min(...[[-1, -1], [1, -1], [-1, 1], [1, 1]].map(([a, b]) => heightAt(s.x + a * s.hx, s.z + b * s.hz))) - 0.3;
   const c = { cover: true, kind: s.kind, tag: s.tag, role: s.role, x: s.x, z: s.z, hx: s.hx, hz: s.hz, y0, h: COVER_H[s.kind], hp: COVER_HP * (COVER_HPK[s.kind] || 1), hp0: COVER_HP * (COVER_HPK[s.kind] || 1), state: 0,
     mn: [s.x - s.hx, y0, s.z - s.hz], mx: [s.x + s.hx, y0 + 0.3 + COVER_H[s.kind], s.z + s.hz] };
   covers.push(c); buildings.push(c); navMarkCover(c, 1);
+  if (!skipGrid) {
+    if (BLDG_GRID) gridInsertBox(BLDG_GRID, c, c.mn[0], c.mn[2], c.mx[0], c.mx[2]); else rebuildBldgGrid();
+    if (COV_GRID) gridInsertBox(COV_GRID, c, c.mn[0], c.mn[2], c.mx[0], c.mx[2]); else rebuildCoverGrid();
+  }
   return c;
 }
 function damageCover(c, dmg, p, shooter, light = false) {
@@ -10547,6 +10786,7 @@ function damageCover(c, dmg, p, shooter, light = false) {
   if (st === 1) { if (!fuel) c.mx[1] = c.y0 + 0.3 + c.h * 0.6; if (shooter && shooter.isPlayer) showHit(fuel ? "FUEL TANK HIT: LEAKING" : "COVER DAMAGED", fuel ? "#ffd34d" : "#c8d0d8"); }
   else {
     const i = buildings.indexOf(c); if (i >= 0) buildings.splice(i, 1);
+    rebuildBldgGrid(); rebuildCoverGrid();
     navMarkCover(c, -1);
     for (const t of tanks) if (t.ai && t.ai.nav) t.ai.nav.repath = true;
     const q = [c.x, c.y0 + 1, c.z];
@@ -11285,13 +11525,18 @@ const ENEMY_AI = { see: 0.85, react: 1.8, aim: 1.7, cadence: [0.9, 2.2], air: 1.
 const isFoeAI = t => !!t.ai && t.team === 1;
 // GUE-5: the nearest soldier of the other side that a gunner at `eye` can see, within `range` (null: none)
 function infTargetFor(t, eye, range) {
-  const near = [];
-  for (const q of INF) {
+  const r2 = range * range, near = [];
+  for (let k = 0; k < INF.length; k++) {
+    const q = INF[k];
     if (q.dead || q.team === t.team || q.st === "boat" || q.st === "gone") continue;
-    const d = dist2d(q.p, t.pos); if (d < range) near.push([d, q]);
+    const dx = q.p[0] - t.pos[0], dz = q.p[2] - t.pos[2], d2 = dx * dx + dz * dz;
+    if (d2 >= r2) continue;
+    if (near.length < 5 || d2 < near[near.length - 1][0]) {
+      near.push([d2, q]); near.sort((x, y) => x[0] - y[0]);
+      if (near.length > 5) near.pop();
+    }
   }
-  near.sort((x, y) => x[0] - y[0]);
-  for (let i = 0; i < Math.min(5, near.length); i++) { const q = near[i][1]; if (los(eye, [q.p[0], q.p[1] + 1.2, q.p[2]])) return q; } // sight checks for the closest few only
+  for (let i = 0; i < near.length; i++) { const q = near[i][1]; if (los(eye, [q.p[0], q.p[1] + 1.2, q.p[2]])) return q; } // sight checks for the closest few only
   return null;
 }
 function updateAI(t, dt, now) {
@@ -11390,11 +11635,13 @@ function updateAI(t, dt, now) {
   let dx = route[0] - t.pos[0], dz = route[2] - t.pos[2];
   const gd = Math.hypot(dx, dz) || 1;
   dx /= gd; dz /= gd;
-  for (const b of buildings) {
+  const steerB = b => {
     const cx = clamp(t.pos[0], b.mn[0], b.mx[0]), cz = clamp(t.pos[2], b.mn[2], b.mx[2]);
     const ox = t.pos[0] - cx, oz = t.pos[2] - cz, d = Math.hypot(ox, oz);
     if (d < 14 && d > 0.01) { const k = (14 - d) / 14 * (route !== goal ? 0.5 : 1.6); dx += ox / d * k; dz += oz / d * k; }
-  }
+  };
+  if (BLDG_GRID) gridNearRect(BLDG_GRID, t.pos[0] - 14, t.pos[2] - 14, t.pos[0] + 14, t.pos[2] + 14, steerB);
+  else for (const b of buildings) steerB(b);
   for (const o of tanks) {
     if (o === t || o.type.air) continue;
     const ox = t.pos[0] - o.pos[0], oz = t.pos[2] - o.pos[2], d = Math.hypot(ox, oz);
@@ -12296,9 +12543,15 @@ function bindSettings(body) {
 // ---------------------------------------------------------------- UI helpers
 const $ = id => document.getElementById(id);
 const overlay = $("overlay"), hud = $("hud2d"), hx = hud.getContext("2d"), mm = $("minimap").getContext("2d");
-let hitTimer = 0, centerTimer = 0, dmgFlash = 0, hitMarkT = 0;
+let hitTimer = 0, centerTimer = 0, dmgFlash = 0, hitMarkT = 0, centerRect = null, centerRectDirty = true;
 // DOM writes only when the value changes (style recalculation every frame is a real cost)
-function txt(el, v) { if (el._t !== v) { el._t = v; el.textContent = v; } }
+function txt(el, v) { if (el._t !== v) { el._t = v; el.textContent = v; if (el.id === "center") centerRectDirty = true; } }
+function getCenterRect() {
+  const ce = $("center");
+  if (centerTimer <= 0 || !ce._t) return null;
+  if (centerRectDirty) { centerRect = ce.getBoundingClientRect(); centerRectDirty = false; }
+  return centerRect;
+}
 function setHtml(el, v) { if (el._h !== v) { el._h = v; el.innerHTML = v; } }
 // pass 18: inline icons from the #sfIcons sprite in the page (hand-drawn line glyphs; inherit the text colour)
 const IC = (n, cls = "") => `<svg class="ic${cls ? ` ${cls}` : ""}" aria-hidden="true"><use href="#i-${n}"/></svg>`;
@@ -12317,6 +12570,7 @@ function centerMsg(text, color = "#fff", prio = msgPrio(text)) {
   // further down and the opening title overlapped the objective banner; push it below the stack when that happens
   const mid = $("mid"), mb = mid ? mid.getBoundingClientRect().bottom : 0;
   css(e, "top", mb + 10 > innerHeight * 0.28 ? `${Math.round(mb + 10)}px` : "");
+  centerRectDirty = true;
 }
 let dmgRepT = 0;
 function dmgReport(head, from, parts, col) {
@@ -12773,6 +13027,7 @@ function sbDelete(o) {
 function sbRemoveCover(c) {
   const i = covers.indexOf(c); if (i < 0) return; covers.splice(i, 1);
   const j = buildings.indexOf(c); if (j >= 0) buildings.splice(j, 1);
+  rebuildBldgGrid(); rebuildCoverGrid();
   if (c.state < 2) navMarkCover(c, -1);
 }
 // bulk clearing: "wrecks" (destroyed vehicles and fallen soldiers), "enemy", "ally", "cover" (sandbox cover, crates, smoke, barrages), "all"
@@ -13250,9 +13505,17 @@ function footDeckY(x, z) {
 }
 // a marine's spot aboard: the open quarterdeck first, then anywhere along the centreline and the sides
 function footDeckSpot(S) {
-  const T = S.type;
-  for (const u of [-0.36, -0.3, -0.42, -0.24, 0.3, 0.36, -0.18, 0.24, 0.0, 0.12, -0.1]) for (const fx of [0, 0.25, -0.25, 0.45, -0.45]) { const lx = fx * T.B / 2, lz = u * T.L; if (footDeckFree(T, lx, lz)) return [lx, lz]; }
-  return [0, -0.4 * T.L];
+  const T = S.type, acs = tanks.filter(u => u.alive && !u.gone && u.type && u.type.air && u.wing === S && u.rec && u.rec.st !== "rtb" && u.rec.st !== "final");
+  let best = null, bestD = -1;
+  for (const u of [-0.36, -0.3, -0.42, -0.24, 0.3, 0.36, -0.18, 0.24, 0.0, 0.12, -0.1]) for (const fx of [0, 0.25, -0.25, 0.45, -0.45]) {
+    const lx = fx * T.B / 2, lz = u * T.L;
+    if (!footDeckFree(T, lx, lz)) continue;
+    let d = 1e9;
+    if (acs.length) { const w = footDeckW(S, lx, lz); for (const a of acs) d = Math.min(d, vehAirD(a, w)); }
+    if (d >= 3.0) return [lx, lz];
+    if (d > bestD) { bestD = d; best = [lx, lz]; }
+  }
+  return best || [0, -0.4 * T.L];
 }
 // the ship's motion carries you; your own steps move you across its deck (sliding along rails and deckhouses)
 function footDeckMove(p, f, dt) {
@@ -13633,8 +13896,91 @@ const W_PTS = {
   rkt:      { gl: [0, -0.04, 0.29], sight: [0.06, 0.168, 0.1], muzzle: [0, 0.1, 0.78], mag: [0, 0.1, -0.78], magM: "rocket", rear: true, tube: true, stock: [0, 0.06, -0.26], rkZ: 0.76 },
   pschreck: { gl: [0, 0.035, 0.12], sight: [0.06, 0.17, 0.0], muzzle: [0, 0.1, 0.84], mag: [0, 0.1, -0.82], magM: "rocket", rear: true, tube: true, stock: [0, 0.06, -0.24] },
 };
-let FOOTM = null, FOOTM_DE = null;
-const footMeshes = (de = false) => de ? FOOTM_DE || (FOOTM_DE = buildFootMeshes(true)) : FOOTM || (FOOTM = buildFootMeshes(false));
+const helRingsLo = (st, lift, nLow) => st.map((s, i) => sRing(s[0], s[1], s[2], s[3] || 0, s[4] || 0, 8, 2.05).map(p => i < nLow ? [p[0], p[1] + lift * Math.max(0, p[2]) / s[2] - (lift * 0.35) * Math.max(0, -p[2]) / s[2], p[2]] : p));
+function footMeshLo(f) { const b = builder(); f(b); return finish(b); }
+function buildFootMeshesLo(de = false) {
+  const m = {}, C = de ? FTC_DE : FTC, cloth = f => withMat(MAT.cloth, f), steel = f => withMat(MAT.steel, f), wood = f => withMat(MAT.wood, f), paint = f => withMat(MAT.paint, f);
+  m.pelvis = footMeshLo(b => {
+    cloth(() => sTube(b, [[0.13, 0.16, 0.112], [-0.15, 0.11, 0.09]], C.pants, 6, 2));
+    fBox(b, 0, 0.075, 0.0, 0.34, 0.055, 0.255, C.web);
+    if (!de) { fBox(b, 0, 0.07, 0.132, 0.28, 0.068, 0.032, C.webD); cloth(() => fBox(b, 0.15, -0.02, -0.1, 0.07, 0.15, 0.06, C.webD)); }
+    else { fBox(b, 0, 0.06, 0.13, 0.25, 0.068, 0.034, C.web); cloth(() => fBox(b, -0.13, -0.02, -0.1, 0.17, 0.15, 0.06, C.bread)); }
+  });
+  m.torso = footMeshLo(b => {
+    cloth(() => sTube(b, [[-0.01, 0.162, 0.112], [0.22, 0.182, 0.13], [0.43, 0.195, 0.118], [0.5, 0.065, 0.06]], C.jacket, 6, 2));
+    cloth(() => fBox(b, 0, 0.48, 0.012, 0.14, 0.05, 0.13, C.shirt));
+    if (!de) {
+      for (const s of [-1, 1]) cloth(() => fBox(b, s * 0.09, 0.28, 0.125, 0.042, 0.34, 0.016, C.web));
+      cloth(() => { fBox(b, 0, 0.29, -0.175, 0.25, 0.3, 0.1, C.web); fBox(b, 0, 0.465, -0.17, 0.3, 0.12, 0.12, C.pants); });
+    } else {
+      for (const s of [-1, 1]) withMat(MAT.rubber, () => fBox(b, s * 0.085, 0.28, 0.125, 0.036, 0.34, 0.016, C.web));
+      steel(() => fBox(b, 0, 0.17, -0.17, 0.1, 0.26, 0.1, C.can));
+      cloth(() => fBox(b, 0.08, 0.36, -0.165, 0.12, 0.13, 0.06, C.pants));
+    }
+  });
+  m.headR = footMeshLo(b => {
+    cloth(() => sTube(b, [[0, 0.056, 0.054], [0.1, 0.054, 0.05]], C.skinD, 6, 2, false));
+    sTube(b, [[0.075, 0.04, 0.045, 0, 0.03], [0.16, 0.084, 0.095, 0, 0.005], [0.27, 0.075, 0.088, 0, -0.01], [0.315, 0.025, 0.032, 0, -0.015]], C.skin, 6, 2, true);
+  });
+  const helmetLo = (b, kind) => {
+    const col = kind === "net" ? C.net : C.hel;
+    if (!de) {
+      paint(() => sLoft(b, helRingsLo([[0.214, 0.138, 0.154, 0, -0.006], [0.295, 0.122, 0.136, 0, -0.009], [0.356, 0.04, 0.048, 0, -0.012]], 0.014, 2), col, true, true));
+      if (kind === "net") for (let i = 0; i < 4; i++) { const a = i * Math.PI / 2; fBox(b, Math.sin(a) * 0.115, 0.31, Math.cos(a) * 0.125 - 0.006, 0.04, 0.05, 0.03, [0.3, 0.33, 0.18], 0.4, a); }
+      if (kind === "medic") for (const [x, z, ry] of [[0, 0.143, 0], [0, -0.155, Math.PI], [0.13, -0.006, Math.PI / 2], [-0.13, -0.006, -Math.PI / 2]]) { fBox(b, x, 0.29, z, 0.07, 0.07, 0.006, C.white, -0.35 * Math.cos(ry), ry); fBox(b, x * 1.005, 0.29, z * 1.005 + (z > 0 ? 0.002 : z < 0 ? -0.002 : 0), 0.054, 0.016, 0.007, C.red, -0.35 * Math.cos(ry), ry); fBox(b, x * 1.005, 0.29, z * 1.005 + (z > 0 ? 0.002 : z < 0 ? -0.002 : 0), 0.016, 0.054, 0.007, C.red, -0.35 * Math.cos(ry), ry); }
+    } else {
+      paint(() => sLoft(b, helRingsLo([[0.155, 0.15, 0.172, 0, -0.018], [0.23, 0.122, 0.14, 0, -0.008], [0.35, 0.038, 0.046, 0, -0.012]], 0.06, 2), col, true, true));
+    }
+  };
+  m.helmet = footMeshLo(b => helmetLo(b, "")); m.helmetNet = footMeshLo(b => helmetLo(b, "net")); m.helmetMed = footMeshLo(b => helmetLo(b, "medic"));
+  m.uarm = footMeshLo(b => cloth(() => sTube(b, [[0.03, 0.068, 0.066], [-0.3, 0.05, 0.05]], C.jacket, 5, 2)));
+  m.uarmMed = footMeshLo(b => { cloth(() => { sTube(b, [[0.03, 0.068, 0.066], [-0.3, 0.05, 0.05]], C.jacket, 5, 2); sTube(b, [[-0.05, 0.071, 0.069], [-0.1, 0.069, 0.067]], C.white, 6, 2, false); }); fBox(b, 0, -0.075, 0.069, 0.03, 0.01, 0.006, C.red); fBox(b, 0, -0.075, 0.069, 0.01, 0.03, 0.006, C.red); });
+  m.farm = footMeshLo(b => { cloth(() => sTube(b, [[0.02, 0.052, 0.05], [-0.235, 0.047, 0.045]], C.jacket, 5, 2)); sTube(b, [[-0.22, 0.034, 0.032], [-0.262, 0.03, 0.028]], C.skin, 5, 2); });
+  m.hand = footMeshLo(b => { fBox(b, 0, -0.04, 0.015, 0.048, 0.08, 0.072, C.skin); fBox(b, 0, -0.088, -0.02, 0.074, 0.03, 0.03, C.skinD); });
+  m.thigh = footMeshLo(b => cloth(() => sTube(b, [[0.06, 0.09, 0.094], [-0.46, 0.058, 0.062, 0, 0.008]], C.pants, 6, 2)));
+  m.shin = footMeshLo(b => {
+    if (!de) { cloth(() => { sTube(b, [[0.04, 0.06, 0.066, 0, 0.004], [-0.22, 0.054, 0.056, 0, -0.008]], C.pants, 6, 2); sTube(b, [[-0.2, 0.06, 0.062, 0, -0.006], [-0.45, 0.054, 0.058, 0, 0.004]], C.legg, 6, 2); }); }
+    else withMat(MAT.rubber, () => sTube(b, [[0.04, 0.062, 0.066, 0, -0.002], [-0.15, 0.066, 0.07, 0, -0.012], [-0.45, 0.056, 0.06, 0, 0.004]], C.boot, 6, 2));
+  });
+  m.foot = footMeshLo(b => withMat(MAT.rubber, () => { fBox(b, 0, -0.048, 0.05, 0.098, 0.062, 0.26, C.boot); fBox(b, 0, -0.082, 0.058, 0.096, 0.016, 0.275, C.sole); }));
+  m.bandolier = footMeshLo(b => cloth(() => { fBox(b, 0.01, 0.26, 0.135, 0.26, 0.07, 0.03, C.webD, 0, 0, -0.78); fBox(b, 0.01, 0.26, -0.26, 0.26, 0.07, 0.03, C.webD, 0, 0, -0.78); }));
+  m.rocketBag = footMeshLo(b => { cloth(() => fBox(b, 0.02, 0.3, -0.3, 0.22, 0.34, 0.1, C.web)); for (const x of [-0.05, 0.05]) fBox(b, x, 0.51, -0.3, 0.05, 0.09, 0.05, [0.36, 0.38, 0.27]); });
+  m.toolPack = footMeshLo(b => { wood(() => fBox(b, 0, 0.22, -0.285, 0.05, 0.42, 0.03, C.wood)); steel(() => { fBox(b, 0, 0, -0.285, 0.15, 0.12, 0.02, C.steelL); fBox(b, -0.1, 0.38, -0.26, 0.12, 0.06, 0.04, C.steel, 0, 0, 0.4); }); });
+  m.medBag = footMeshLo(b => cloth(() => { for (const s of [-1, 1]) { fBox(b, s * 0.15, 0.02, 0.09, 0.08, 0.12, 0.08, C.web); fBox(b, s * 0.15, 0.04, 0.132, 0.04, 0.012, 0.004, C.red); fBox(b, s * 0.15, 0.04, 0.132, 0.012, 0.04, 0.004, C.red); } fBox(b, 0.01, 0.27, 0.13, 0.24, 0.045, 0.015, C.web, 0, 0, -0.82); }));
+  m.radioPack = footMeshLo(b => { paint(() => { fBox(b, 0, 0.29, -0.26, 0.26, 0.4, 0.13, C.radio); fBox(b, 0, 0.05, -0.25, 0.25, 0.12, 0.12, [0.26, 0.28, 0.2]); }); steel(() => fBox(b, 0.09, 0.94, -0.27, 0.014, 0.92, 0.014, C.steel)); });
+  const W = {};
+  W.rifle = footMeshLo(b => { wood(() => { fBox(b, 0, -0.028, -0.19, 0.042, 0.09, 0.38, C.wood, -0.1); fBox(b, 0, 0.008, 0.21, 0.042, 0.04, 0.42, C.wood); }); steel(() => { fBox(b, 0, 0.038, 0.35, 0.024, 0.024, 0.74, C.steel); fBox(b, 0, 0.062, -0.006, 0.026, 0.018, 0.02, C.steel); fBox(b, 0, 0.056, 0.705, 0.014, 0.022, 0.012, C.steel); }); });
+  W.carbine = footMeshLo(b => { wood(() => { fBox(b, 0, -0.024, -0.165, 0.038, 0.08, 0.33, C.wood, -0.1); fBox(b, 0, 0.006, 0.15, 0.038, 0.034, 0.3, C.wood); }); steel(() => { fBox(b, 0, 0.035, 0.28, 0.022, 0.022, 0.58, C.steel); fBox(b, 0, 0.056, -0.01, 0.022, 0.016, 0.016, C.steel); }); });
+  W.smg = footMeshLo(b => { wood(() => { fBox(b, 0, -0.025, -0.2, 0.038, 0.075, 0.28, C.wood, -0.12); fBox(b, 0, -0.05, -0.01, 0.034, 0.1, 0.045, C.wood, -0.2); fBox(b, 0, -0.008, 0.275, 0.04, 0.03, 0.11, C.wood); }); steel(() => { fBox(b, 0, 0.035, 0.08, 0.05, 0.052, 0.28, C.steel); fBox(b, 0, 0.04, 0.34, 0.022, 0.022, 0.24, C.steel); }); });
+  W.lmg = footMeshLo(b => { wood(() => { fBox(b, 0, -0.03, -0.22, 0.046, 0.095, 0.39, C.wood, -0.1); fBox(b, 0, 0.008, 0.41, 0.05, 0.042, 0.22, C.wood); }); steel(() => { fBox(b, 0, 0.028, 0.135, 0.052, 0.07, 0.33, C.steel); fBox(b, 0, 0.045, 0.63, 0.026, 0.026, 0.67, C.steel); fBox(b, 0, 0.085, 0.12, 0.02, 0.024, 0.14, C.steelL); }); });
+  W.lmgBipodF = footMeshLo(b => steel(() => { for (const s of [-1, 1]) fBox(b, s * 0.017, -0.026, -0.165, 0.01, 0.012, 0.33, C.steel); fBox(b, 0, -0.006, 0, 0.05, 0.026, 0.03, C.steel); }));
+  W.lmgBipod = footMeshLo(b => steel(() => { for (const s of [-1, 1]) fBox(b, s * 0.022, -0.17, 0, 0.014, 0.34, 0.014, C.steel, 0, 0, s * 0.28); fBox(b, 0, 0, 0, 0.06, 0.03, 0.03, C.steel); }));
+  W.bipLeg = footMeshLo(b => steel(() => fBox(b, 0, 0.5, 0, 0.012, 1, 0.012, C.steel)));
+  W.bipPad = footMeshLo(b => steel(() => fBox(b, 0, 0.006, 0, 0.034, 0.012, 0.02, C.steel)));
+  W.bipYoke = footMeshLo(b => steel(() => fBox(b, 0, 0, 0, 0.06, 0.03, 0.03, C.steel)));
+  W.at = footMeshLo(b => { paint(() => sTubeZ(b, [[-0.78, 0.04, 0.04, 0, 0.1], [0.69, 0.036, 0.036, 0, 0.1]], C.tube, 6, 2)); wood(() => { fBox(b, 0, 0, 0, 0.034, 0.11, 0.05, C.wood); fBox(b, 0, 0.01, 0.28, 0.034, 0.1, 0.05, C.wood); fBox(b, 0, 0.045, -0.24, 0.048, 0.03, 0.24, C.wood); }); steel(() => fBox(b, 0.055, 0.148, 0.28, 0.016, 0.05, 0.34, C.steel)); });
+  W.rkt = footMeshLo(b => { paint(() => sTubeZ(b, [[-0.79, 0.034, 0.034, 0, 0.1], [0.78, 0.034, 0.034, 0, 0.1]], C.tube, 6, 2)); wood(() => { fBox(b, 0, 0, 0, 0.034, 0.11, 0.05, C.wood); fBox(b, 0, 0.01, 0.29, 0.034, 0.1, 0.05, C.wood); }); steel(() => { fBox(b, 0, 0.1, 0.02, 0.08, 0.08, 0.1, C.steelL); fBox(b, 0.058, 0.153, 0.1, 0.024, 0.045, 0.07, C.steel); }); });
+  W.sniper = footMeshLo(b => { wood(() => { fBox(b, 0, -0.025, -0.22, 0.042, 0.09, 0.38, C.wood, -0.1); fBox(b, 0, 0.006, 0.26, 0.042, 0.034, 0.52, C.wood); }); steel(() => { fBox(b, 0, 0.036, 0.41, 0.024, 0.024, 0.88, C.steel); fBox(b, 0, 0.098, 0.06, 0.034, 0.034, 0.38, C.steel); fBox(b, 0, 0.068, 0.05, 0.022, 0.04, 0.18, C.steel); }); });
+  W.k98 = footMeshLo(b => { wood(() => { fBox(b, 0, -0.025, -0.22, 0.04, 0.088, 0.38, C.wood, -0.1); fBox(b, 0, 0.006, 0.26, 0.04, 0.034, 0.52, C.wood); }); steel(() => { fBox(b, 0, 0.036, 0.35, 0.022, 0.022, 0.78, C.steel); fBox(b, 0, 0.06, 0.2, 0.02, 0.016, 0.06, C.steel); }); });
+  W.mp40 = footMeshLo(b => { steel(() => { fBox(b, 0, 0.01, -0.19, 0.04, 0.025, 0.27, C.steel); fBox(b, 0, 0.036, 0.065, 0.038, 0.04, 0.27, C.steel); fBox(b, 0, 0.034, 0.3, 0.02, 0.02, 0.22, C.steel); }); withMat(MAT.rubber, () => fBox(b, 0, -0.05, -0.01, 0.032, 0.1, 0.04, [0.24, 0.13, 0.08])); });
+  W.mg42 = footMeshLo(b => { withMat(MAT.rubber, () => { fBox(b, 0, -0.025, -0.24, 0.044, 0.08, 0.33, [0.18, 0.12, 0.08]); fBox(b, 0, -0.05, -0.01, 0.032, 0.1, 0.04, [0.18, 0.12, 0.08]); }); steel(() => { fBox(b, 0, 0.034, 0.12, 0.06, 0.072, 0.4, C.steel); fBox(b, 0, 0.04, 0.57, 0.048, 0.048, 0.5, C.steelL); fBox(b, 0, 0.04, 0.87, 0.052, 0.052, 0.1, C.steel); }); });
+  W.pschreck = footMeshLo(b => { paint(() => { sTubeZ(b, [[-0.82, 0.048, 0.048, 0, 0.1], [0.82, 0.046, 0.046, 0, 0.1]], C.tube, 6, 2); fBox(b, 0.08, 0.15, 0.42, 0.24, 0.22, 0.008, [0.36, 0.39, 0.32]); }); wood(() => fBox(b, 0, 0, 0, 0.034, 0.11, 0.05, C.wood)); });
+  W.magRifle = footMeshLo(b => steel(() => fBox(b, 0, 0, 0, 0.03, 0.035, 0.05, C.brass)));
+  W.magBox = footMeshLo(b => steel(() => fBox(b, 0, -0.07, 0.002, 0.026, 0.14, 0.045, C.steel)));
+  W.magBar = footMeshLo(b => steel(() => fBox(b, 0, -0.075, 0.002, 0.03, 0.15, 0.052, C.steel)));
+  W.magLong = footMeshLo(b => steel(() => fBox(b, 0, -0.1, 0.004, 0.028, 0.2, 0.048, C.steel)));
+  W.magStick = footMeshLo(b => steel(() => fBox(b, 0, -0.125, 0, 0.024, 0.25, 0.04, C.steel)));
+  W.belt = footMeshLo(b => steel(() => fBox(b, 0.09, -0.04, 0, 0.12, 0.024, 0.05, C.brass, 0, 0, -0.35)));
+  W.rocket = footMeshLo(b => paint(() => sTubeZ(b, [[-0.25, 0.028, 0.028], [0.14, 0.03, 0.03], [0.22, 0.001, 0.001]], [0.38, 0.4, 0.3], 5, 2)));
+  W.nade = footMeshLo(b => { paint(() => fBox(b, 0, 0, 0, 0.052, 0.076, 0.052, [0.3, 0.33, 0.2])); steel(() => fBox(b, 0, 0.045, 0, 0.018, 0.02, 0.018, C.steelL)); });
+  W.flash = footMeshLo(b => { fBox(b, 0, 0, 0.06, 0.15, 0.018, 0.18, [1, 0.82, 0.45]); fBox(b, 0, 0, 0.03, 0.018, 0.15, 0.018, [1, 0.8, 0.4]); });
+  W.handset = footMeshLo(b => paint(() => fBox(b, 0, 0, 0, 0.035, 0.035, 0.17, [0.14, 0.14, 0.13])));
+  W.binos = footMeshLo(b => paint(() => fBox(b, 0, 0, 0, 0.09, 0.045, 0.12, [0.16, 0.16, 0.15])));
+  W.kit = footMeshLo(b => cloth(() => { fBox(b, 0, 0, 0, 0.1, 0.06, 0.12, C.white); fBox(b, 0, 0.031, 0, 0.06, 0.004, 0.018, C.red); fBox(b, 0, 0.031, 0, 0.018, 0.004, 0.06, C.red); }));
+  m.W = W; return m;
+}
+let FOOTM = null, FOOTM_DE = null, FOOTM_LO = null, FOOTM_DE_LO = null;
+const footMeshes = (de = false, lo = false) => lo ? (de ? FOOTM_DE_LO || (FOOTM_DE_LO = buildFootMeshesLo(true)) : FOOTM_LO || (FOOTM_LO = buildFootMeshesLo(false))) : (de ? FOOTM_DE || (FOOTM_DE = buildFootMeshes(true)) : FOOTM || (FOOTM = buildFootMeshes(false)));
 
 // ---- rig: forward kinematics for the trunk and head, two-bone IK for the arms (hands on the weapon's grips) and the
 // legs (boots planted on the ground, stepping along the soldier's real movement, so strafing and backing up step right)
@@ -13761,8 +14107,10 @@ function bipodRestY(x, y, z) {
   take(deckAt(x, z));
   const Dk = player && player.F && player.F.deck; if (Dk && shipOk(Dk.ship)) { const S = Dk.ship, T = S.type, dx = x - S.pos[0], dz = z - S.pos[2], X = vnorm([S.X[0], 0, S.X[2]]), Z = vnorm([S.Z[0], 0, S.Z[2]]), lx = dx * X[0] + dz * X[2], lz = dx * Z[0] + dz * Z[2];
     for (const b of T.sup || []) if (lx > b[0] && lx < b[3] && lz > b[2] && lz < b[5]) take(tp(S.M, [lx, b[4], lz])[1]); }
-  for (const c of covers) if (c.state < 2 && c.mn && x > c.mn[0] && x < c.mx[0] && z > c.mn[2] && z < c.mx[2]) take(c.mx[1]);
-  for (const b of buildings) if (!b.stack && x > b.mn[0] && x < b.mx[0] && z > b.mn[2] && z < b.mx[2] && b.mx[1] < y + 0.02) take(b.mx[1]);
+  const tc = c => { if (c.state < 2 && c.mn && x > c.mn[0] && x < c.mx[0] && z > c.mn[2] && z < c.mx[2]) take(c.mx[1]); };
+  if (COV_GRID) gridNearRect(COV_GRID, x - 0.1, z - 0.1, x + 0.1, z + 0.1, tc); else for (const c of covers) tc(c);
+  const tb = b => { if (!b.stack && x > b.mn[0] && x < b.mx[0] && z > b.mn[2] && z < b.mx[2] && b.mx[1] < y + 0.02) take(b.mx[1]); };
+  if (BLDG_GRID) gridNearRect(BLDG_GRID, x - 0.1, z - 0.1, x + 0.1, z + 0.1, tb); else for (const b of buildings) tb(b);
   if (M.key !== "dday") for (const q of INF) { // the scrape's parapet (drawn with the AI soldiers: 2.2 x 0.6 x 0.5 m ahead of the post, side walls 0.5 m)
     if (q.st !== "post" || !q.post || q.dead || Math.abs(q.post[0] - x) > 2 || Math.abs(q.post[1] - z) > 2) continue;
     const a = q.team ? Math.PI : 0, ux = x - q.post[0], uz = z - q.post[1], lx = ux * Math.cos(a) - uz * Math.sin(a), lz = ux * Math.sin(a) + uz * Math.cos(a);
@@ -13795,8 +14143,8 @@ function bipodLegs(p, f, R, P) {
   if (Math.abs(legs[0].ft[1] - legs[1].ft[1]) > 0.1) return null;
   f.bipRest = true; return R.bip = { legs };
 }
-function footDrawRig(p, f, R, fp, sink = null) { // sink(mesh, M, tint, emis): collect instead of drawing (pass 37: the middle band)
-  const m = footMeshes(!!p.de), T = p.type, wk = p.wpnK || T.R.wpn, dark = p.alive ? WHITE : [0.82, 0.8, 0.78];
+function footDrawRig(p, f, R, fp, sink = null, lo = false) { // sink(mesh, M, tint, emis): collect instead of drawing (pass 37: the middle band)
+  const m = footMeshes(!!p.de, lo), T = p.type, wk = p.wpnK || T.R.wpn, dark = p.alive ? WHITE : [0.82, 0.8, 0.78];
   let K = null; // death: the whole pose tips over backwards about the boots (onto the ground, never through it)
   if (!p.alive) { const k = smoothstep(0, 0.85, f.deadT), Rt = R.Rt, piv = vadd(p.pos, [0, 0.2, 0]), tilt = k * f.fallA;
     K = chain(trans(...piv), axisRot(Rt, tilt), trans(-piv[0], -piv[1], -piv[2])); }
@@ -13885,8 +14233,7 @@ function vehEscape(t, x, z, y, blocked, lim = 0.6, pos = t.pos, yaw = t.yaw) {
   return { pinned: true, deepest: L[0][5], exits: L };
 }
 // what stops an AI soldier: standing cover, buildings, water too deep to wade, the map edge
-const infBlocked = (x, z) => Math.abs(x) > HALF - 8 || Math.abs(z) > HALF - 8 || (WATER_Y !== null && waterDepth(x, z) > WADE_MAX) || footBlocked(x, z) ||
-  covers.some(c => c.state < 2 && c.mn && x > c.mn[0] - 0.3 && x < c.mx[0] + 0.3 && z > c.mn[2] - 0.3 && z < c.mx[2] + 0.3);
+const infBlocked = (x, z) => Math.abs(x) > HALF - 8 || Math.abs(z) > HALF - 8 || (WATER_Y !== null && waterDepth(x, z) > WADE_MAX) || footBlocked(x, z) || covBlockedAt(x, z, 0.3);
 // pass 45: a ground vehicle never drives into a soldier who has nowhere to go (a tank used to pin you against a wall,
 // and an AI tank drove through its own infantry). After the move, any soldier now deeper in the hull than before
 // and with no free face within reach of this step puts the vehicle back where it was, stopped. Enemies in front of a
@@ -13924,10 +14271,11 @@ function infVehResolve(s, solid, dt, mv = null) {
   }
 }
 function footBlocked(x, z, y = null) {
-  const r = FOOT.r;
-  for (const b of buildings) if (footInBox(x, z, b.mn, b.mx, r) && (y === null || y < b.mx[1] - 0.3)) return true;
-  for (const c of covers) if (c.state < 2 && c.mn && footInBox(x, z, c.mn, c.mx, r * 0.8) && (y === null || y < c.mx[1] - 0.45)) return true;
-  return false;
+  const r = FOOT.r, br = r * 0.8;
+  const hitB = b => footInBox(x, z, b.mn, b.mx, r) && (y === null || y < b.mx[1] - 0.3);
+  if (BLDG_GRID ? gridNearRect(BLDG_GRID, x - r, z - r, x + r, z + r, hitB) : buildings.some(hitB)) return true;
+  const hitC = c => c.state < 2 && c.mn && footInBox(x, z, c.mn, c.mx, br) && (y === null || y < c.mx[1] - 0.45);
+  return COV_GRID ? gridNearRect(COV_GRID, x - br, z - br, x + br, z + br, hitC) : covers.some(hitC);
 }
 // enter (or re-enter) the battle on foot as `role`; quiet: the battle's opening deployment
 function footEnter(role, quiet = false, keepPref = false) {
@@ -13950,6 +14298,7 @@ function footSpawn(p, quiet = false) {
   if (p.inf) { const i = INF.indexOf(p.inf); if (i >= 0) INF.splice(i, 1); }
   p.type = footType(p.footRole); p.hp = p.type.hp; p.alive = true; p.deadT = 0; p.killedBy = null; p.speed = 0; p.reloadT = 0; p.reloadFull = p.type.reload; p.repairT = 0;
   p.F = footState(p); cam.sniper = false; respawnT = 0; p.footSave = null; p.boardWant = null; mouseTap = false; footTaps.clear(); // SAS-5 (r7): no stale tap into a new life
+  cam.fboom = cam.fsh = cam.fEyeY = undefined; cam.aimF = -1;
   let at = null, boat = null;
   if (M.key === "dday" && ms.dd && DDL && ms.dd.stage === 0) { // H-hour: a squad landing craft, you at the ramp; it grounds, the ramp drops, off you go
     const x = IFC.boats[(Math.random() * IFC.boats.length) | 0] + rand(-12, 12), n0 = boats.length; infBoat(x, false); boat = boats[n0]; if (boat) at = [boat.x, boat.z];
@@ -14021,7 +14370,7 @@ function footStep(p, dt) {
   f.flashT = Math.max(0, f.flashT - dt); f.fireHold = Math.max(0, (f.fireHold || 0) - dt); f.kick = Math.max(0, f.kick - dt * 6); f.fireCd -= dt; f.boltT = Math.max(0, f.boltT - dt);
   if (f.deck && shipOk(f.deck.ship)) { const D = f.deck; if (!p.alive) p.pos = footDeckW(D.ship, D.lx, D.lz); } // the deck carries you (and where you fell)
   else if (f.deck && p.alive) { const S = f.deck.ship; footDie(S && S.lastHitBy && S.lastHitBy.team !== p.team ? S.lastHitBy : null); centerMsg("YOUR SHIP WENT DOWN UNDER YOU", "#ff8a6a"); }
-  if (!p.alive) { f.deadT += dt; p.deadT += dt; f.mvS = approach(f.mvS, 0, dt * 4); footSync(p); return; }
+  if (!p.alive) { f.deadT += dt; p.deadT += dt; f.grenPend = null; f.mvS = approach(f.mvS, 0, dt * 4); footSync(p); return; }
   // landing craft: ride it until the ramp is down
   if (f.ride) { const b = f.ride;
     if (!boats.includes(b) || b.state === "open" || b.state === "back") { f.ride = null; p.boat = null; f.crouch = false; if (p.inf) p.inf.boat = null; centerMsg("RAMP DOWN · GO, GO, GO\nCross the sand to the obstacles and the seawall", "#ffcf5a"); }
@@ -14059,7 +14408,9 @@ function footStep(p, dt) {
     if (!q) continue;
     if (q.pinned) { const q0 = vehEscape(t, g[0], g[2], g[1], bad, 99); if (!q0) { nx = g[0]; nz = g[2]; } else if (!q0.pinned) { nx = q0[0]; nz = q0[1]; } else { nx = g[0]; nz = g[2]; } f.vel[0] = f.vel[2] = 0; continue; }
     nx = q[0]; nz = q[1]; const vn = f.vel[0] * q[3] + f.vel[2] * q[4]; if (vn < 0) { f.vel[0] -= vn * q[3]; f.vel[2] -= vn * q[4]; } }
-  for (const tr of trees) { if (tr.falling) continue; const dx = nx - tr.x, dz = nz - tr.z, rr = 0.32 * tr.s + FOOT.r; if (dx * dx + dz * dz < rr * rr && dx * dx + dz * dz > 1e-6) { const dd = Math.hypot(dx, dz); nx = tr.x + dx / dd * rr; nz = tr.z + dz / dd * rr; } }
+  const pushTree = tr => { if (tr.falling) return; const dx = nx - tr.x, dz = nz - tr.z, rr = 0.32 * tr.s + FOOT.r, d2 = dx * dx + dz * dz; if (d2 < rr * rr && d2 > 1e-6) { const dd = Math.sqrt(d2); nx = tr.x + dx / dd * rr; nz = tr.z + dz / dd * rr; } };
+  if (TREE_GRID) gridNearRect(TREE_GRID, nx - 2.5, nz - 2.5, nx + 2.5, nz + 2.5, pushTree);
+  else for (const tr of trees) pushTree(tr);
   if (bad(nx, nz)) { nx = g[0]; nz = g[2]; }
   const ground = Math.max(heightAt(nx, nz), deckAt(nx, nz));
   if (!f.ride) {
@@ -14091,9 +14442,14 @@ function footStep(p, dt) {
   // weapon: reload, fire (hitscan bullets or a rocket), bolt cycle
   if (reloading) { f.relT -= dt; p.reloadT = Math.max(0, f.relT); if (f.relT <= 0) { const n = Math.min(Wp.mag - f.mag, f.res); f.mag += n; f.res -= n; f.relT = 0; p.reloadT = 0; } }
   if (!edit && !f.ride && (keys.has("KeyR") || tapR) && !reloading && f.mag < Wp.mag && f.res > 0 && !fixing) footReload(p);
+  if (f.grenPend && (f.grenPend.t -= dt) <= 0) {
+    f.grenPend = null;
+    const gd = vnorm(vadd(cam.dir, [0, 0.32, 0])), go = vadd(p.pos, [0, 1.7, 0]);
+    footGren.push({ p: vadd(go, vscale(gd, 0.6)), v: vadd(vscale(gd, 17), [f.vel[0], 0, f.vel[2]]), t: 2.6 });
+  }
   const trig = (mouseDown || tapFire) && !edit && !f.ride && !fixing;
   if (trig && f.mag <= 0 && !reloading && f.res > 0 && !f.trig) footReload(p);
-  if (trig && f.mag > 0 && !reloading && f.fireCd <= 0 && f.boltT <= 0 && !(Wp.semi && f.trig) && f.sprS < 0.3 && f.thrS < 0.2) footFire(p);
+  if (trig && f.mag > 0 && !reloading && f.fireCd <= 0 && f.boltT <= 0 && !(Wp.semi && f.trig) && f.sprS < 0.3 && f.thrS < 0.2) { if (!cam.aim || cam.aimF < 0) footCamera(p, 0); footFire(p); }
   f.trig = trig;
   if (Wp.lock) footLockStep(p, f, dt); // SAS-5: the Rocket trooper's seeker
   // engineer: hold F at an allied vehicle; anyone: ammunition from an allied vehicle or crate within 9 m
@@ -14197,14 +14553,13 @@ function drawFootLock(p, f, W, H) {
 function footReload(p) { const f = p.F, W = p.type.Wp; f.relT = f.relFull = W.rel * (f.mag > 0 && !W.rocket ? 0.85 : 1); p.reloadFull = f.relFull; f.adsS = Math.min(f.adsS, 0.5); if (AC && AC.state === "running") noiseHit(0.05, 2400, 900, 0.05); }
 function footThrow(p) {
   const f = p.F; if (!p.alive || f.nades <= 0 || f.thrT > 0 || f.ride || f.relT > 0) return;
-  f.nades--; f.thrT = 0.7;
-  const d = vnorm(vadd(cam.dir, [0, 0.32, 0])), o = vadd(p.pos, [0, 1.7, 0]);
-  setTimeout(() => { if (player === p && p.alive) footGren.push({ p: vadd(o, vscale(d, 0.6)), v: vadd(vscale(d, 17), [f.vel[0], 0, f.vel[2]]), t: 2.6 }); }, 280);
+  f.nades--; f.thrT = 0.7; f.grenPend = { t: 0.28 };
 }
 function footFire(p) {
   const f = p.F, W = p.type.Wp, R = f.rig;
   f.mag--; f.fireCd = W.rof; f.fireHold = 1.4;
-  if (W.ping && f.mag === 0 && AC && AC.state === "running") setTimeout(() => { if (AC.state === "running") noiseHit(0.05, 5200, 3800, 0.09); }, 90); // SAS-5: the Garand's empty en-bloc clip ejects with its ping f.kick = Math.min(1.4, f.kick + W.kick * 0.9); f.flashT = 0.05; camKick(W.kick * 0.35);
+  if (W.ping && f.mag === 0 && AC && AC.state === "running") setTimeout(() => { if (AC.state === "running") noiseHit(0.05, 5200, 3800, 0.09); }, 90); // SAS-5: the Garand's empty en-bloc clip ejects with its ping
+  f.kick = Math.min(1.4, f.kick + W.kick * 0.9); f.flashT = 0.05; camKick(W.kick * 0.35);
   if (W.bolt) f.boltT = W.rof;
   cam.pitch = clamp(cam.pitch + W.kick * 0.012 * (1 - f.bipS * 0.6), -1.35, 1.35); cam.yaw = wrapA(cam.yaw + (Math.random() - 0.5) * W.kick * 0.008);
   const mz = R ? tp(R.WM, W_PTS[p.type.R.wpn].muzzle) : vadd(p.pos, [0, 1.5, 0]);
@@ -14249,17 +14604,39 @@ function footCamera(p, dt) {
   }
   const fovW = lerp(1.1, p.type.Wp.fov, f.adsS) * (1 + f.sprS * 0.06);
   cam.fov = fovW;
-  if (f.fp) { cam.pos = R.eye.slice(); }
+  const ey = R.eye[1];
+  cam.fEyeY = cam.fEyeY === undefined || Math.abs(ey - cam.fEyeY) > 0.35 || dt <= 0 ? ey : lerp(cam.fEyeY, ey, 1 - Math.exp(-dt * 24));
+  const eyePos = [R.eye[0], cam.fEyeY, R.eye[2]];
+  if (f.fp) { cam.pos = eyePos; }
   else {
     // pass 43: beside a vehicle the over-the-shoulder view pulls back and up (it sat at the hull, the soldier filling
     // the screen against the armour); the boom still stops short of the hull, buildings and the ground (camBoom)
     let vn = 9; for (const t of tanks) if (t.alive !== undefined && t !== p && !t.gone && t.type && !t.type.air && !t.type.ship && !t.type.foot) vn = Math.min(vn, vehHullD(t, p.pos));
     cam.fveh = approach(cam.fveh || 0, vn < 5 ? 1 : 0, dt * 2); const kv = cam.fveh * (1 - f.adsS);
     const sh = lerp(0.55, 0.42, f.adsS), up = lerp(0.12, 0.06, f.adsS) + kv * 0.32, want = lerp(cam.footDist || 2.3, 1.05, f.adsS) + kv * 1.1;
-    const pivot = vadd(R.eye, vadd(vscale(R.Rt, -0.0), [0, up, 0])), side = vadd(pivot, vscale([-Math.cos(cam.yaw), 0, Math.sin(cam.yaw)], sh));
-    const safeSide = trace(pivot, side, p) ? pivot : side;
+    const pivot = vadd(eyePos, [0, up, 0]), rt = [-Math.cos(cam.yaw), 0, Math.sin(cam.yaw)], sideFull = vadd(pivot, vscale(rt, sh));
+    let bestT = 1;
+    const sx0 = Math.min(pivot[0], sideFull[0]) - 0.3, sz0 = Math.min(pivot[2], sideFull[2]) - 0.3, sx1 = Math.max(pivot[0], sideFull[0]) + 0.3, sz1 = Math.max(pivot[2], sideFull[2]) + 0.3;
+    const testSideB = bd => { const h = segAABB(pivot, sideFull, [bd.mn[0] - 0.15, bd.mn[1], bd.mn[2] - 0.15], [bd.mx[0] + 0.15, bd.mx[1] + 0.15, bd.mx[2] + 0.15]); if (h && h.t < bestT) bestT = h.t; };
+    if (typeof BLDG_GRID !== "undefined" && BLDG_GRID) gridNearRect(BLDG_GRID, sx0, sz0, sx1, sz1, testSideB);
+    else for (const bd of buildings) if (bd.mx[0] > sx0 && bd.mn[0] < sx1 && bd.mx[2] > sz0 && bd.mn[2] < sz1) testSideB(bd);
+    for (const t of tanks) { if (t === p || t.gone || !t.type || t.type.air || t.type.ship || t.type.foot || !t.X) continue;
+      if (Math.abs(t.pos[0] - pivot[0]) > t.type.L + 2 || Math.abs(t.pos[2] - pivot[2]) > t.type.L + 2) continue;
+      const da = vsub(pivot, t.pos), db = vsub(sideFull, t.pos), T = t.type, la = [vdot(da, t.X), vdot(da, t.Y), vdot(da, t.Z)], lb = [vdot(db, t.X), vdot(db, t.Y), vdot(db, t.Z)];
+      const h = segAABB(la, lb, [-T.W / 2 - 0.15, -0.2, -T.L / 2 - 0.15], [T.W / 2 + 0.15, (T.H || 2.4) + 0.15, T.L / 2 + 0.15]); if (h && h.t < bestT) bestT = h.t; }
+    if (p.F && p.F.deck && shipOk(p.F.deck.ship)) {
+      const ds = p.F.deck.ship, dt0 = ds.type, da = vsub(pivot, ds.pos), db = vsub(sideFull, ds.pos);
+      const la = [vdot(da, ds.X), vdot(da, ds.Y), vdot(da, ds.Z)], lb = [vdot(db, ds.X), vdot(db, ds.Y), vdot(db, ds.Z)];
+      for (const q of dt0.sup || []) if (q[4] > footDeckH(dt0, (q[2] + q[5]) * 0.5) + 0.4) {
+        const h = segAABB(la, lb, [q[0] - 0.15, q[1], q[2] - 0.15], [q[3] + 0.15, q[4] + 0.15, q[5] + 0.15]); if (h && h.t < bestT) bestT = h.t;
+      }
+    }
+    if (surfAt(sideFull[0], sideFull[2]) + 0.25 > sideFull[1]) bestT = Math.min(bestT, 0.35);
+    const wantSh = bestT < 1 ? Math.max(0, (bestT - 0.15) * sh) : sh;
+    cam.fsh = cam.fsh === undefined || wantSh < cam.fsh || dt <= 0 ? wantSh : approach(cam.fsh, wantSh, dt * 3.5);
+    const safeSide = vadd(pivot, vscale(rt, Math.min(sh, cam.fsh)));
     const safe = camBoom(safeSide, look, want), b = cam.fboom === undefined || safe < cam.fboom ? safe : approach(cam.fboom, safe, dt * 4); cam.fboom = b;
-    cam.pos = vsub(safeSide, vscale(look, b)); cam.pos[1] = Math.max(cam.pos[1], heightAt(cam.pos[0], cam.pos[2]) + 0.25);
+    cam.pos = vsub(safeSide, vscale(look, b)); cam.pos[1] = Math.max(cam.pos[1], Math.max(heightAt(cam.pos[0], cam.pos[2]), deckAt(cam.pos[0], cam.pos[2])) + 0.25);
   }
   cam.dir = look;
   // SAS-5: the 1500 m aim ray (terrain, every vehicle and soldier) once per drawn frame; a slow frame runs up to five
@@ -14272,11 +14649,18 @@ function footCamera(p, dt) {
   cam.aimDist = vlen(vsub(cam.aim, R.eye));
   if (FEEL.kick || FEEL.fov) { const k2 = FEEL.kick; cam.dir = vnorm(vadd(cam.dir, [0, k2 * 0.02, 0])); cam.fov *= 1 + FEEL.fov * 0.5; }
 }
-function drawFoot() {
+function drawFoot(sharedBy = null) {
   const p = player; if (!p || !p.type || !p.type.foot || !p.F || !p.F.rig) return;
   if (!shadowPass && p.alive && p.type.Wp.scope && p.F.adsS > 0.6) return; // looking through the scope
   if (!shadowPass && !sphereVisible(FR, p.pos[0], p.pos[1] + 1, p.pos[2], 2)) return;
-  footDrawRig(p, p.F, p.F.rig, !shadowPass && p.F.fp);
+  const lo = SOFTWARE_GL && !p.F.fp;
+  if (SOFTWARE_GL && !shadowPass && !p.F.fp) {
+    const by = sharedBy || new Map(), sink = (mesh, M, tint, emis) => { let a = by.get(mesh); if (!a) by.set(mesh, a = []); a.push(M, tint, emis); };
+    footDrawRig(p, p.F, p.F.rig, false, sink, lo);
+    if (!sharedBy && by.size) { const prev = cur; use(P.inst); for (const [mesh, a] of by) { for (let i = 0; i < a.length; i += 3) pushInst(a[i], a[i + 1][0], a[i + 1][1], a[i + 1][2], a[i + 2], 1); flushInst(mesh); } if (prev) use(prev); }
+    return;
+  }
+  footDrawRig(p, p.F, p.F.rig, !shadowPass && p.F.fp, null, lo);
 }
 function drawFootGren() { for (const q of footGren) draw(footMeshes().W.nade, chain(trans(...q.p), rotX(q.t * 9)), WHITE, 0, 1, 0.2); }
 // ---- HUD: crosshair that opens with the spread, scope, ammunition, health, role, hit direction, prompts, role picker
@@ -14295,17 +14679,18 @@ function drawFootHud(W, H) {
     if (hitMarkT > 0) { hx.strokeStyle = `rgba(255,255,255,${clamp(hitMarkT * 4, 0, 1)})`; hx.lineWidth = 2.2; hx.beginPath(); for (const [a, b] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) { hx.moveTo(cx + a * 6, cy + b * 6); hx.lineTo(cx + a * 13, cy + b * 13); } hx.stroke(); }
     if (f.hurtDir !== null && now - f.hurtT < 1.4) { const a = wrapA(f.hurtDir - cam.yaw), al = 1 - (now - f.hurtT) / 1.4; hx.save(); hx.translate(cx, cy); hx.rotate(-a); hx.strokeStyle = `rgba(255,60,40,${(al * 0.85).toFixed(2)})`; hx.lineWidth = 6; hx.beginPath(); hx.arc(0, 0, 110, -Math.PI / 2 - 0.35, -Math.PI / 2 + 0.35); hx.stroke(); hx.restore(); }
     // bottom right: weapon, ammunition, grenades; bottom centre: health
-    const x = W - 24, y = H - 262; hx.textAlign = "right"; hx.lineWidth = 3; hx.strokeStyle = "rgba(0,0,0,.75)";
+    const x = W - 24, y = H - 278; hx.textAlign = "right"; hx.lineWidth = 3; hx.strokeStyle = "rgba(0,0,0,.75)";
     hx.font = "bold 30px ui-monospace, Menlo, monospace"; const am = `${f.mag}`; hx.strokeText(am, x - 70, y); hx.fillStyle = f.mag === 0 ? "#ff6a5a" : f.mag <= Wp.mag * 0.25 ? "#ffd479" : "#fff"; hx.fillText(am, x - 70, y);
     hx.font = "bold 16px ui-monospace, Menlo, monospace"; hx.strokeText(`/ ${f.res}`, x, y); hx.fillStyle = "#cfd6dd"; hx.fillText(`/ ${f.res}`, x, y);
     hx.font = "bold 12px system-ui, sans-serif"; const wl = `${T.name.toUpperCase()} · ${Wp.name}`; hx.strokeText(wl, x, y - 34); hx.fillStyle = "#ffd479"; hx.fillText(wl, x, y - 34);
-    if (M.op && ms.op) { const sq = "Squad: Z follow · X hold · E attack · Q regroup"; hx.strokeText(sq, x, y + 36); hx.fillStyle = "#9fd4ff"; hx.fillText(sq, x, y + 36); }
     const gl = `G grenade ×${f.nades}${f.ride && (T.role === "engineer" || T.role === "medic" || T.role === "radio") ? " · F: after the ramp drops" : T.role === "engineer" ? " · F repair" : T.role === "medic" ? " · F treat / revive" : T.role === "radio" ? ` · F artillery${f.radioCd > 0 ? ` (${Math.ceil(f.radioCd)} s)` : " READY"}` : ""}${Wp.bipod ? ` · C crouch: brace${f.bipS > 0.5 ? " ON" : ""}` : ""}`; hx.strokeText(gl, x, y + 18); hx.fillStyle = "#cfd6dd"; hx.fillText(gl, x, y + 18);
+    const st = [f.crouch ? "CROUCHED" : "", f.sprS > 0.5 ? "SPRINT" : "", cam.footFP ? "1st PERSON" : ""].filter(Boolean).join(" · ");
+    if (st) { hx.font = "bold 11px system-ui, sans-serif"; hx.strokeStyle = "rgba(0,0,0,.8)"; hx.strokeText(st, x, y + 34); hx.fillStyle = "#fff"; hx.fillText(st, x, y + 34); }
+    if (M.op && ms.op) { hx.font = "bold 12px system-ui, sans-serif"; hx.strokeStyle = "rgba(0,0,0,.75)"; const sq = "Squad: Z follow · X hold · E attack · Q regroup"; hx.strokeText(sq, x, y + 50); hx.fillStyle = "#9fd4ff"; hx.fillText(sq, x, y + 50); }
     if (f.relT > 0) { hx.textAlign = "center"; hx.font = "bold 13px system-ui, sans-serif"; hx.strokeText("RELOADING", cx, cy + 46); hx.fillStyle = "#ffd479"; hx.fillText("RELOADING", cx, cy + 46);
       hx.strokeStyle = "#ffd479"; hx.lineWidth = 2; hx.beginPath(); hx.arc(cx, cy, 20, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (1 - f.relT / f.relFull)); hx.stroke(); }
     else if (f.mag === 0) { hx.textAlign = "center"; hx.font = "bold 13px system-ui, sans-serif"; const t = f.res > 0 ? "R RELOAD" : "NO AMMO · RESUPPLY AT AN ALLIED VEHICLE"; hx.strokeText(t, cx, cy + 46); hx.fillStyle = "#ff8a6a"; hx.fillText(t, cx, cy + 46); }
-    const hyp = H - 236;
-    hx.textAlign = "center"; hx.font = "bold 11px system-ui, sans-serif"; hx.strokeStyle = "rgba(0,0,0,.8)"; hx.lineWidth = 3; const st = `${f.crouch ? "CROUCHED " : ""}${f.sprS > 0.5 ? " · SPRINT" : ""}${cam.footFP ? " · 1st PERSON" : ""}`; if (st) { hx.textAlign = "right"; hx.strokeText(st, W - 24, hyp); hx.fillStyle = "#fff"; hx.fillText(st, W - 24, hyp); hx.textAlign = "center"; }
+    hx.textAlign = "center"; hx.font = "bold 11px system-ui, sans-serif"; hx.strokeStyle = "rgba(0,0,0,.8)"; hx.lineWidth = 3;
     const ft = f.fixTarget; if (T.role === "engineer" && ft && (ft.hp < ft.type.hp || ft.trackT > 0)) { const s = f.fixS > 0.5 ? `REPAIRING ${ft.name} · ${Math.round(ft.hp / ft.type.hp * 100)}%` : `Hold F: repair ${ft.name} (${Math.round(ft.hp / ft.type.hp * 100)}%)`; hx.strokeText(s, cx, cy + 70); hx.fillStyle = "#9be38b"; hx.fillText(s, cx, cy + 70); }
     if (T.role === "medic" && f.medTarget) { const s = f.fixS > 0.5 ? "REVIVING…" : "Hold F: revive the wounded rifleman"; hx.strokeText(s, cx, cy + 70); hx.fillStyle = "#9be38b"; hx.fillText(s, cx, cy + 70); }
     if (f.deck) { const s = `MARINE ABOARD ${f.deck.name}`; hx.strokeText(s, cx, cy + 88); hx.fillStyle = "#9fd4ff"; hx.fillText(s, cx, cy + 88); }
@@ -14641,7 +15026,7 @@ function vehFootRestore(p, role, pos, deck) {
   if (S) { const f = p.F; f.mag = S.mag; f.res = S.res; f.nades = S.nades; f.hurtT = S.hurtT; f.radioCd = Math.max(0, S.radioCd - (now - S.t)); }
   p.F.deck = deck || null; p.pos = pos.slice(); p.vel = [0, 0, 0]; p.F.bodyYaw = p.F.aimYaw = cam.yaw; p.F.pitch = cam.pitch;
   vehInfOff(p); p.inf = infMake(0, p.pos[0], p.pos[2], "pl", { pl: true });
-  p.footSave = null; cam.sniper = false; freeDir = null; respawnT = 0; footSync(p);
+  p.footSave = null; cam.sniper = false; freeDir = null; respawnT = 0; cam.fboom = cam.fsh = cam.fEyeY = undefined; cam.aimF = -1; footSync(p);
   if (allyFollow) setAllyFollow(true, true);
 }
 // the role you get out as: the one you rode in with, else your last infantry role, else rifleman
@@ -14794,7 +15179,7 @@ function newBattle() {
     strike: "TARGET 1/3: THE FLAK GUNS\nFly north over the gorge to the depot · destroy the 4 flak guns (gold markers) · Space bomb · R rockets · 6 sorties",
     dday: "H-HOUR · you are aboard a landing craft\nThe ramp drops when it grounds: drive off, cross the sand, go up a draw to the beach exit · B: naval gunfire",
     sandbox: `${MAPD.name} · free play, no clock\nO: editor` }[M.key];
-  centerTimer = 0; centerPrio = 0; // a new battle's title always replaces whatever the last battle was showing
+  centerTimer = 0; centerPrio = 0; mmAcc = 1; // a new battle's title always replaces whatever the last battle was showing
   centerMsg(`${M.name.toUpperCase()}\n${player.type.foot ? (start || "").replace("C hold", "X hold (on foot)").replace(/\n?[^\n]*(drive off|Space bomb|landing craft)[^\n]*/g, "") + `\nON FOOT: ${player.type.name.toUpperCase()} · I: change role or take your vehicle` : start}${player.type.foot ? "" : PT !== selectedType ? `\n${selectedType.name} is ${isOwned(selectedType) ? "not allowed here" : "locked (buy it in the hangar)"}: using the ${PT.name}` : ""}`, "#ffcf5a");
 }
 // result: "win" | "loss" | "draw"; reason: "tickets" | "time" | "objectives" | "zone" | "neutral" | "waves"
@@ -14854,7 +15239,7 @@ function startPlaying() {
   initAudio();
   const fresh = state === "menu" || state === "over";
   if (fresh) newBattle();
-  if (fresh && typeof footMeshes === "function") { footMeshes(false); footMeshes(true); } // SAS-5: both kits up front (the German one was built on first contact: a ~150 ms freeze)
+  if (fresh && typeof footMeshes === "function") { footMeshes(false, true); footMeshes(true, true); footMeshes(false, false); if (!SOFTWARE_GL) footMeshes(true, false); } // SAS-5: kits built up front; WARP skips unused German high-poly kit
   closeModal(); lobbyMenu(false);
   state = "playing"; overlay.style.display = "none";
   const fd = $("fade"); fd.classList.add("on"); requestAnimationFrame(() => requestAnimationFrame(() => fd.classList.remove("on"))); // fade in from black
@@ -14981,7 +15366,7 @@ document.addEventListener("keydown", e => {
 document.addEventListener("keyup", e => { keys.delete(e.code); if (e.code === cine.skipKey) cine.skipKey = null; if (e.code === "KeyC" && freeDir && player.type.air) { const d = freeDir; cam.yaw = Math.atan2(d[0], d[2]); cam.pitch = Math.asin(clamp(d[1], -1, 1)); freeDir = null; } });
 window.addEventListener("blur", () => { keys.clear(); mouseDown = false; mouseTap = false; footTaps.clear(); cine.skipKey = null; });
 
-let timeScale = 1;
+let timeScale = 1, mmAcc = 1;
 let frozen = false; // paused / battle over: the scene behind the menu is drawn once, not every frame
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, Q.dprCap) * renderScale;
@@ -14990,6 +15375,7 @@ function resize() {
   if (Q.msaa ? !msaa || msaa.w !== w || msaa.h !== h : msaa) setupMsaa();
   if (postWanted() ? !post || post.w !== w || post.h !== h : post) setupPost();
   hud.width = innerWidth; hud.height = innerHeight;
+  centerRectDirty = true; mmAcc = 1;
   frozen = false;
 }
 // Changing the canvas size (a resize, or a quality step that changes resolution) clears it. Done after a
@@ -15010,7 +15396,7 @@ let gfxMode = "auto";
 try { const m = localStorage.getItem("steelfront.gfx"); if (GFX_MODES.includes(m)) gfxMode = m; } catch (e) { /* storage unavailable (file:// in some browsers) */ }
 { const u = (/[?&]gfx=(auto|high|medium|low)\b/.exec(location.search) || [])[1]; if (u) gfxMode = u; } // pass 17: "Retry with Low graphics" (this session only)
 // Auto starts at Medium on a GPU, and lower on a software renderer, then adjusts from measured frame times
-let ladder = SOFTWARE_GL ? 5 : 1;
+let ladder = SOFTWARE_GL ? 7 : 1;
 // pass 17: a shader that this GPU's driver rejects used to stop the whole start-up. Now a failing preset falls back
 // to Low (the simplest shaders, no shadows) for this session, without changing the saved choice; only a failure at
 // Low itself is fatal, and then the boot panel explains it.
@@ -15128,21 +15514,33 @@ function updateCamera(dt) {
 // ever moves toward the pivot, so it can never see past a wall the tank itself could not see past.
 const CAM_R = 0.7, CAM_MIN = 3;
 function camBoom(pivot, look, want) {
+  const isFoot = !!(player && player.type && player.type.foot);
+  const rad = isFoot ? 0.24 : CAM_R, minD = isFoot ? Math.min(0.45, want) : Math.min(CAM_MIN, want), tStep = isFoot ? 0.6 : 1.5;
   const back = vscale(look, -1), side = vnorm(vcross(look, [0, 1, 0])), up = vcross(side, look);
   let best = want;
-  const end = vadd(pivot, vscale(back, want + CAM_R)), lo = [Math.min(pivot[0], end[0]) - 2, Math.min(pivot[2], end[2]) - 2], hi = [Math.max(pivot[0], end[0]) + 2, Math.max(pivot[2], end[2]) + 2];
-  const near = buildings.filter(b => b.mx[0] > lo[0] && b.mn[0] < hi[0] && b.mx[2] > lo[1] && b.mn[2] < hi[1]);
-  const nearV = player && player.type && player.type.foot ? tanks.filter(t => t !== player && !t.gone && t.type && !t.type.air && !t.type.ship && !t.type.foot && t.X && dist2d(t.pos, pivot) < want + 4 + t.type.L / 2) : [];
-  for (const o of [[0, 0], [CAM_R, 0], [-CAM_R, 0], [0, CAM_R], [0, -CAM_R]]) {
-    const a = vadd(pivot, vadd(vscale(side, o[0] * 0.5), vscale(up, o[1] * 0.5))), b = vadd(a, vscale(back, want + CAM_R)), L = want + CAM_R;
-    for (const bd of near) { const h = segAABB(a, b, [bd.mn[0] - 0.15, bd.mn[1], bd.mn[2] - 0.15], [bd.mx[0] + 0.15, bd.mx[1] + 0.15, bd.mx[2] + 0.15]); if (h && h.t > 0) best = Math.min(best, h.t * L - CAM_R); }
+  const end = vadd(pivot, vscale(back, want + rad)), lo = [Math.min(pivot[0], end[0]) - 2, Math.min(pivot[2], end[2]) - 2], hi = [Math.max(pivot[0], end[0]) + 2, Math.max(pivot[2], end[2]) + 2];
+  const near = [];
+  if (typeof BLDG_GRID !== "undefined" && BLDG_GRID) gridNearRect(BLDG_GRID, lo[0], lo[1], hi[0], hi[1], b => near.push(b));
+  else for (const b of buildings) if (b.mx[0] > lo[0] && b.mn[0] < hi[0] && b.mx[2] > lo[1] && b.mn[2] < hi[1]) near.push(b);
+  const nearV = isFoot ? tanks.filter(t => t !== player && !t.gone && t.type && !t.type.air && !t.type.ship && !t.type.foot && t.X && dist2d(t.pos, pivot) < want + 4 + t.type.L / 2) : [];
+  const deckS = isFoot && player.F && player.F.deck && shipOk(player.F.deck.ship) ? player.F.deck.ship : null;
+  const deckT = deckS ? deckS.type : null, deckSup = deckT && deckT.sup ? deckT.sup.filter(q => q[4] > footDeckH(deckT, (q[2] + q[5]) * 0.5) + 0.4) : [];
+  const deckAir = deckS ? tanks.filter(u => u.alive && !u.gone && u.type && u.type.air && u.wing === deckS && u.rec && u.rec.st === "deck" && u.X) : [];
+  for (const o of [[0, 0], [rad, 0], [-rad, 0], [0, rad], [0, -rad]]) {
+    const a = vadd(pivot, vadd(vscale(side, o[0] * 0.5), vscale(up, o[1] * 0.5))), b = vadd(a, vscale(back, want + rad)), L = want + rad;
+    for (const bd of near) { const h = segAABB(a, b, [bd.mn[0] - 0.15, bd.mn[1], bd.mn[2] - 0.15], [bd.mx[0] + 0.15, bd.mx[1] + 0.15, bd.mx[2] + 0.15]); if (h && h.t > 0) best = Math.min(best, h.t * L - rad); }
     for (const t of nearV) { const da = vsub(a, t.pos), db = vsub(b, t.pos), T = t.type, la = [vdot(da, t.X), vdot(da, t.Y), vdot(da, t.Z)], lb = [vdot(db, t.X), vdot(db, t.Y), vdot(db, t.Z)]; // pass 43: ground vehicles block the boom too (it went through the hull)
-      const h = segAABB(la, lb, [-T.W / 2 - 0.15, -0.2, -T.L / 2 - 0.15], [T.W / 2 + 0.15, (T.H || 2.4) + 0.15, T.L / 2 + 0.15]); if (h && h.t > 0) best = Math.min(best, h.t * L - CAM_R); }
-    for (let d = 1.5; d < Math.min(L, best + CAM_R); d += 1.5) { const q = vadd(a, vscale(back, d)); if (q[1] < surfAt(q[0], q[2]) + 0.5) { best = Math.min(best, d - CAM_R); break; } }
+      const h = segAABB(la, lb, [-T.W / 2 - 0.15, -0.2, -T.L / 2 - 0.15], [T.W / 2 + 0.15, (T.H || 2.4) + 0.15, T.L / 2 + 0.15]); if (h && h.t > 0) best = Math.min(best, h.t * L - rad); }
+    if (deckSup.length) { const da = vsub(a, deckS.pos), db = vsub(b, deckS.pos), la = [vdot(da, deckS.X), vdot(da, deckS.Y), vdot(da, deckS.Z)], lb = [vdot(db, deckS.X), vdot(db, deckS.Y), vdot(db, deckS.Z)];
+      for (const q of deckSup) { const h = segAABB(la, lb, [q[0] - 0.18, q[1], q[2] - 0.18], [q[3] + 0.18, q[4] + 0.18, q[5] + 0.18]); if (h && h.t > 0) best = Math.min(best, h.t * L - rad); } }
+    for (const u of deckAir) { const da = vsub(a, u.pos), db = vsub(b, u.pos), T = u.type, hw = (T.hit ? T.hit.fw * 0.5 : 1.5) + 0.35, hl = (T.hit ? T.hit.nose : 4.2) + 0.35;
+      const la = [vdot(da, u.X), vdot(da, u.Y), vdot(da, u.Z)], lb = [vdot(db, u.X), vdot(db, u.Y), vdot(db, u.Z)];
+      const h = segAABB(la, lb, [-hw, -0.5, -hl], [hw, 2.6, hl]); if (h && h.t > 0) best = Math.min(best, h.t * L - rad); }
+    for (let d = tStep; d < Math.min(L, best + rad); d += tStep) { const q = vadd(a, vscale(back, d)); if (q[1] < surfAt(q[0], q[2]) + (isFoot ? 0.28 : 0.5)) { best = Math.min(best, d - rad); break; } }
   }
-  return clamp(best, Math.min(CAM_MIN, want), want);
+  return clamp(best, minD, want);
 }
-function step(dt) {
+function step(dt, camDt = dt) {
   battleTime += dt; now += dt;
   NAV.budget = NAV.perStep;
   const p = player;
@@ -15251,7 +15649,7 @@ function step(dt) {
   updateConsumables(dt);
   ambientFx(dt);
   tipStep(dt);
-  if (!edit) updateCamera(dt); // (the editor camera runs on real time in sbFrame)
+  if (!edit && camDt !== null) updateCamera(camDt); // (the editor camera runs on real time in sbFrame)
   applyShake(dt);
   for (const tr of trees) if (tr.falling && tr.fall < 1.45) {
     tr.fall = Math.min(1.45, tr.fall + dt * (0.6 + tr.fall * 2.5));
@@ -15324,12 +15722,12 @@ let REC = null;
 function recDraws(fn) { const prev = REC, L = REC = []; try { fn(); } finally { REC = prev; } return L; }
 function playDraws(L) {
   for (let i = 0; i < L.length; i++) { const e = L[i], mesh = e[0];
-    if (BATCH && e[4] === 1 && !e[6] && !e[5] && !mesh.indexed) { let a = BATCH.get(mesh); if (!a) BATCH.set(mesh, a = []); a.push(e[1], e[2], e[3]); }
+    if (BATCH && e[4] === 1 && !e[6] && (!e[5] || Q.spec === 0) && !mesh.indexed) { let a = BATCH.get(mesh); if (!a) BATCH.set(mesh, a = []); a.push(e[1], e[2], e[3]); }
     else draw(mesh, e[1], e[2], e[3], e[4], e[5], e[6]); }
 }
 function draw(mesh, M, tint, emis = 0, alpha = 1, spec = 0, detail = 0) {
   if (REC) { REC.push([mesh, Float32Array.from(M), tint.slice(), emis, alpha, spec, detail]); return; }
-  if (BATCH && alpha === 1 && !detail && !spec && !mesh.indexed) { let a = BATCH.get(mesh); if (!a) BATCH.set(mesh, a = []); a.push(M.slice(), tint, emis); return; }
+  if (BATCH && alpha === 1 && !detail && (!spec || Q.spec === 0) && !mesh.indexed) { let a = BATCH.get(mesh); if (!a) BATCH.set(mesh, a = []); a.push(M.slice(), tint, emis); return; }
   setDraw(M, tint, emis, alpha, spec, detail);
   gl.bindVertexArray(mesh.vao);
   if (mesh.indexed) gl.drawElements(gl.TRIANGLES, mesh.count, gl.UNSIGNED_INT, 0);
@@ -15355,6 +15753,27 @@ function drawChunks(mesh, F, maxD = 0, detail = 0, spec = 0, emis = 0, alpha = 1
   }
   flush();
 }
+function drawTerrain(F, maxD = 0) {
+  if (!terrainMesh.lods) { drawChunks(terrainMesh, F, maxD, 1); return; }
+  setDraw(IDENT, WHITE, 0, 1, 0, 1);
+  gl.bindVertexArray(terrainMesh.vao);
+  const [d0, d1, d2] = SOFTWARE_GL ? [30, 95, 210] : Q.detail === 0 ? [130, 320, 620] : Q.detail === 1 ? [220, 500, 900] : [340, 700, 1200];
+  const k = cam.fov / 1.1, l0 = (d0 / k) ** 2, l1 = (d1 / k) ** 2, l2 = (d2 / k) ** 2, md2 = maxD * maxD, cx = cam.pos[0], cz = cam.pos[2];
+  const R = [[], [], [], []], L0 = terrainMesh.lods[0];
+  for (let i = 0; i < L0.length; i++) {
+    const c0 = L0[i]; if (!c0.count || !boxVisible(F, c0.mn, c0.mx)) continue;
+    const dx = Math.max(c0.mn[0] - cx, 0, cx - c0.mx[0]), dz = Math.max(c0.mn[2] - cz, 0, cz - c0.mx[2]), d2 = dx * dx + dz * dz;
+    if (maxD > 0 && d2 >= md2) continue;
+    const li = d2 < l0 ? 0 : d2 < l1 ? 1 : d2 < l2 ? 2 : 3, c = terrainMesh.lods[li][i];
+    R[li].push(c && c.count ? c : c0);
+  }
+  for (const list of R) {
+    let a = -1, e = 0;
+    const fl = () => { if (a >= 0) { gl.drawElements(gl.TRIANGLES, e - a, gl.UNSIGNED_INT, a * 4); a = -1; } };
+    for (const c of list) { if (a >= 0 && c.first === e) e += c.count; else { fl(); a = c.first; e = c.first + c.count; } }
+    fl();
+  }
+}
 // trees as instanced draws: full meshes up close, simplified ones further out (the shadow map uses the full ones)
 // pass 17 (QA R1): in the main view a tree whose crown holds the camera, or sits across the line from the camera to
 // your vehicle within 30 m, is left out (it filled a third of the screen with flat green). Its shadow, collision and
@@ -15368,7 +15787,8 @@ function treeCut(t) {
   return (c[0] - q[0]) ** 2 + (c[1] - q[1]) ** 2 + (c[2] - q[2]) ** 2 < r * r;
 }
 function drawTrees(F, maxD, lod = true, cut = false) {
-  const md2 = maxD * maxD, cx = cam.pos[0], cy = cam.pos[1], cz = cam.pos[2], k = cam.fov / 1.1, l2 = TREE_LOD * TREE_LOD / (k * k);
+  const md2 = maxD * maxD, cx = cam.pos[0], cy = cam.pos[1], cz = cam.pos[2], k = cam.fov / 1.1;
+  const lodR = SOFTWARE_GL ? (cy - heightAt(cx, cz) > 120 ? 140 : 48) : TREE_LOD, l2 = lodR * lodR / (k * k);
   for (const mesh of TREE_MESHES) {
     for (const far of lod ? [false, true] : [false]) {
       for (const t of trees) {
@@ -15441,7 +15861,9 @@ function render() {
   const alt = cam.pos[1] - heightAt(cam.pos[0], cam.pos[2]), airView = (player && player.type.air && state !== "menu" && state !== "cine") || alt > 120;
   const AD = sbAtmoD() || MAPD; // the map's own air, or the sandbox's weather and light over it
   applyAtmo(AD);
-  const fogFar = lerp(FOG_FAR * ((AD.atmo && AD.atmo.fog) || 1), 4200, smoothstep(30, 350, airView ? Math.max(alt, 60) : 0));
+  let fogFar = lerp(FOG_FAR * ((AD.atmo && AD.atmo.fog) || 1), 4200, smoothstep(30, 350, airView ? Math.max(alt, 60) : 0));
+  const wf = SOFTWARE_GL && !airView && state === "playing";
+  if (wf) fogFar = Math.min(fogFar, MAPD.naval ? 1650 : player && player.type && player.type.foot ? 680 : 900);
   frameU.fogFar = fogFar; frameU.nOff = airView ? 0.4 : 0.18;
   farUpdate();
   const Pm = perspective(cam.fov, canvas.width / canvas.height, airView ? 0.8 : player && player.type.foot && state !== "cine" ? (player.F && player.F.fp ? 0.04 : 0.1) : MAPD.naval ? 0.6 : 0.3, airView || MAPD.naval ? 7000 : 2500);
@@ -15462,7 +15884,8 @@ function render() {
     if (t.isPlayer && cam.sniper && t.alive && !t.type.air) continue;
     if (unitVisible(FR, t)) drawUnit(t, discs);
   }
-  drawFoot(); drawInfantryNear(); if (footGren.length) drawFootGren(); // GUE-7: the player soldier; GUE-5: the nearest AI soldiers in detail
+  const fBy = SOFTWARE_GL && !shadowPass && player && player.type && player.type.foot && player.F && !player.F.fp ? new Map() : null;
+  drawFoot(fBy); drawInfantryNear(); if (footGren.length) drawFootGren(); // GUE-7: the player soldier; GUE-5: the nearest AI soldiers in detail
   for (const s of shells) {
     if (s.kind !== "bomb" && s.kind !== "rocket") continue;
     const Z = vnorm(s.v), X = vnorm(vcross(Math.abs(Z[1]) > 0.99 ? [1, 0, 0] : [0, 1, 0], Z)), Y = vcross(Z, X);
@@ -15480,11 +15903,13 @@ function render() {
     pushInst(basisScaled(X, Y, Z, [s.p[0] - Z[0] * L / 2, s.p[1] - Z[1] * L / 2, s.p[2] - Z[2] * L / 2], w, w, L), c[0], c[1], c[2], 1, 1);
   }
   flushInst(cubeMesh);
-  if (INF.length) { drawInfantry(FR); drawInfantryMid(); }
-  drawTrees(FR, Math.min(fogFar + 20, Q.treeDist * (airView ? 2 : 1)), true, true);
+  if (INF.length) drawInfantry(FR);
+  if (INF.length || (fBy && fBy.size)) drawInfantryMid(fBy);
+  drawTrees(FR, Math.min(fogFar + 20, (wf ? Math.min(Q.treeDist, 380) : Q.treeDist) * (airView ? 2 : 1)), true, true);
   use(P.plain);
-  drawChunks(propsMesh, FR);
-  drawChunks(vegMesh, FR, Q.vegDist * (airView ? 1.6 : 1));
+  drawChunks(propsMesh, FR, wf ? fogFar + 60 : 0);
+  if (propsDetMesh) drawChunks(propsDetMesh, FR, SOFTWARE_GL ? 115 : Q.detail === 0 ? 190 : Q.detail === 1 ? 380 : 0);
+  drawChunks(vegMesh, FR, (SOFTWARE_GL && !airView ? 140 : Q.vegDist) * (airView ? 1.6 : 1));
   for (const z of zones) {
     const zp = z.pos, c = z.owner === 0 ? [0.25, 0.55, 1] : z.owner === 1 ? [1, 0.3, 0.25] : [0.95, 0.95, 0.95];
     if (!MAPD.naval) draw(flagMesh, chain(trans(zp[0], zp[1], zp[2]), rotY(now * 0.3)), c, 0.3);
@@ -15507,15 +15932,15 @@ function render() {
   }
   // SAS-5 (r5): the (opaque) water before the ground, so the sea bed under it fails the depth test instead of running the
   // ground shader first and then being painted over: in a naval battle that was most of the screen shaded twice
-  if (waterMesh) { use(P.plain); drawChunks(waterMesh, FR, 0, 0, 0.3); }
-  if (farStat.on && WATER_Y !== null) { use(P.plain); for (const c of FAR.values()) if (c.water && boxVisible(FR, c.mn, c.mx)) draw(c.water, IDENT, WHITE, 0, 1, 0.3); }
+  if (waterMesh) { use(P.plain); drawChunks(waterMesh, FR, wf ? fogFar + 180 : 0, 0, 0.3); }
+  if (farStat.on && !wf && WATER_Y !== null) { use(P.plain); for (const c of FAR.values()) if (c.water && boxVisible(FR, c.mn, c.mx)) draw(c.water, IDENT, WHITE, 0, 1, 0.3); }
   use(P.ground);
   gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-1, -4); // road surface sits a hair above the terrain
-  drawChunks(roadMesh, FR, 0, 0.8);
+  drawChunks(roadMesh, FR, SOFTWARE_GL && !airView ? 200 : Q.detail === 0 ? 420 : 0, 0.8);
   gl.disable(gl.POLYGON_OFFSET_FILL);
-  drawChunks(terrainMesh, FR, 0, 1);
-  drawChunks(outerMesh, FR, 0, 0.7); // SAS-5 (r5): only the regions in view
-  if (farStat.on) for (const c of FAR.values()) if (c.mesh && boxVisible(FR, c.mn, c.mx)) draw(c.mesh, IDENT, WHITE, 0, 1, 0, 0.7);
+  drawTerrain(FR, wf ? fogFar + 120 : 0);
+  drawChunks(outerMesh, FR, wf ? (MAPD.naval ? fogFar + 100 : fogFar + 40) : 0, 0.7); // SAS-5 (r5): only the regions in view
+  if (farStat.on && !wf) for (const c of FAR.values()) if (c.mesh && boxVisible(FR, c.mn, c.mx)) draw(c.mesh, IDENT, WHITE, 0, 1, 0, 0.7);
   // sky last: only the pixels nothing else covered
   gl.depthFunc(gl.LEQUAL); gl.depthMask(false); gl.disable(gl.CULL_FACE);
   for (const [pr, mesh] of [[skyProg, skyDome], [sunProg, sunPatch]]) {
@@ -15529,8 +15954,8 @@ function render() {
   // translucent: clouds, propeller discs, smoke and fire
   gl.enable(gl.BLEND); gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA); /* pass 32: alpha accumulates as a + dst(1 - a), so fire and flashes over a masked surface keep their bloom */
   use(P.fxPlain);
-  drawChunks(cloudMesh, FR, 0, 0, 0, 0.4, 0.82);
-  if (farStat.on) { const tx = Math.round(cam.pos[0] / 6200), tz = Math.round(cam.pos[2] / 6200); // the cloud field repeats every 6.2 km out there
+  drawChunks(cloudMesh, FR, wf ? 1800 : 0, 0, 0, 0.4, 0.82);
+  if (farStat.on && !wf) { const tx = Math.round(cam.pos[0] / 6200), tz = Math.round(cam.pos[2] / 6200); // the cloud field repeats every 6.2 km out there
     for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) if (tx + a || tz + b) drawChunks(cloudMesh, FR, 0, 0, 0, 0.4, 0.82, (tx + a) * 6200, (tz + b) * 6200); }
   for (const [M, a] of discs) draw(discMesh, M, [0.2, 0.2, 0.2], 0, a);
   use(P.fx);
@@ -15569,7 +15994,7 @@ function render() {
     if (L > 1) pushInst(basisScaled(X, Y, Z, vsub(s.p, vscale(Z, L / 2)), 0.42 * tk, 0.42 * tk, L), 1, 0.72, 0.38, 1, 0.32);
     pushInst(basisScaled(X, Y, Z, s.p, 0.7 * tk, 0.7 * tk, 1.3 * tk), 1, 0.9, 0.6, 1, 0.75);
   }
-  flushInst(puffMesh);
+  flushInst(SOFTWARE_GL ? puffMeshLo : puffMesh);
   // SAS-5: on foot the camera stands 1-2 m up, in the dust, smoke and back-blast round the soldier: a puff the eye is
   // inside covers the whole screen, and a dozen of them overdrew every pixel over and over (the infantry lag on
   // integrated GPUs). Those are skipped and the ones within about a puff's size of the eye fade out, as a soft particle would.
@@ -15582,21 +16007,73 @@ function render() {
     m[0] = c; m[1] = 0; m[2] = -sn; m[3] = 0; m[4] = 0; m[5] = sz; m[6] = 0; m[7] = 0; m[8] = sn; m[9] = 0; m[10] = c; m[11] = 0; m[12] = q.p[0]; m[13] = q.p[1]; m[14] = q.p[2]; m[15] = 1;
     pushInst(m, q.col[0], q.col[1], q.col[2], q.emis, a);
   }
-  flushInst(puffMesh);
+  flushInst(SOFTWARE_GL ? puffMeshLo : puffMesh);
   gl.depthMask(true); gl.disable(gl.BLEND);
   finishScene();
 }
 // apparent distance: zooming the gunner sight brings the full-detail meshes back
 const viewDist = p => Math.hypot(p[0] - cam.pos[0], p[1] - cam.pos[1], p[2] - cam.pos[2]) * cam.fov / 1.1;
+function tankWarpMeshes(T) {
+  if (T._warpM) return T._warpM;
+  const c = T.nation === "Germany" ? [0.58, 0.56, 0.48] : [0.52, 0.56, 0.47], tr = [0.14, 0.14, 0.14], dk = [0.18, 0.18, 0.18];
+  const y0 = T.hullY0 || 0.35, hH = Math.max(0.5, T.hullTop - y0), tw = T.tw || 0.55;
+  const h = builder();
+  addBox(h, chain(trans(0, y0 + hH * 0.5, 0), scl(Math.max(0.8, T.W - tw * 1.1), hH, T.L * 0.94)), c);
+  for (const s of [-1, 1]) addBox(h, chain(trans(s * (T.W * 0.5 - tw * 0.5), Math.min(1.05, T.hullTop * 0.65) * 0.5 + 0.05, 0), scl(tw, Math.min(1.05, T.hullTop * 0.65), T.L)), tr);
+  const t = builder();
+  addBox(t, chain(trans(0, T.tur.h * 0.5, 0), scl(T.tur.w, T.tur.h, T.tur.l)), c);
+  const g = builder(), br = Math.max(0.14, (T.bar && T.bar.r ? T.bar.r : 0.07) * 2.2), bl = (T.bar && T.bar.len) || 4;
+  addBox(g, chain(trans(0, 0, bl * 0.5), scl(br, br, bl)), dk);
+  return (T._warpM = { h: finish(h), t: finish(t), g: finish(g) });
+}
+function planeWarpMesh(T) {
+  if (T._warpP) return T._warpP;
+  const c = T.jet || T.heli ? [0.62, 0.65, 0.68] : [0.54, 0.58, 0.50], dk = [0.24, 0.25, 0.26];
+  const H = T.hit || { fw: 1.1, fh: 1.4, nose: 4, tail: -5, wz: 1, chord: 2.2, wy: -0.3, ts: 3.6, tz: -4.5 };
+  const b = builder(), fL = H.nose - H.tail, fZ = (H.nose + H.tail) * 0.5;
+  addBox(b, chain(trans(0, 0.05, fZ), scl(H.fw, H.fh * 0.85, fL)), c);
+  if (T.heli) {
+    const pp = T.propPos || [0, 2.3, 0];
+    addBox(b, chain(trans(pp[0], pp[1], pp[2]), scl((T.propR || 6) * 1.9, 0.12, 0.35)), dk);
+    addBox(b, chain(trans(0, H.fh * 0.55, H.tz), scl(0.18, H.fh * 0.9, 1.3)), c);
+  } else {
+    addBox(b, chain(trans(0, H.wy, H.wz), scl(T.span || 10.5, 0.28, H.chord * 0.85)), c);
+    addBox(b, chain(trans(0, 0.15, H.tz), scl(H.ts || 3.6, 0.18, 1.1)), c);
+    addBox(b, chain(trans(0, H.fh * 0.65, H.tz), scl(0.18, H.fh * 1.1, 1.4)), c);
+  }
+  return (T._warpP = finish(b));
+}
+function shipWarpMesh(T) {
+  if (T._warpS) return T._warpS;
+  const hull = [0.46, 0.50, 0.53], dk = [0.24, 0.26, 0.28], sup = [0.52, 0.55, 0.58];
+  const b = builder();
+  if (T.sub) {
+    addBox(b, chain(trans(0, 0, 0), scl(T.B, T.D * 0.8, T.L * 0.9)), dk);
+    addBox(b, chain(trans(0, T.D * 0.5 + 2.2, T.L * 0.1), scl(T.B * 0.32, 4.4, T.L * 0.18)), dk);
+  } else {
+    const hH = (T.deckY || 5) + T.D * 0.4, bowH = (T.deckY || 5) + T.D * 0.35;
+    addBox(b, chain(trans(0, hH * 0.5 - T.D * 0.4, -T.L * 0.1), scl(T.B, hH, T.L * 0.72)), hull);
+    addBox(b, chain(trans(0, bowH * 0.5 - T.D * 0.35, T.L * 0.36), scl(T.B * 0.52, bowH, T.L * 0.26)), hull);
+    const list = T.sup || [];
+    for (let i = 0; i < Math.min(6, list.length); i++) {
+      const q = list[i];
+      addBox(b, chain(trans((q[0] + q[3]) * 0.5, (q[1] + q[4]) * 0.5, (q[2] + q[5]) * 0.5), scl(q[3] - q[0], q[4] - q[1], q[5] - q[2])), sup);
+    }
+    if (T.mastH) addBox(b, chain(trans(0, T.mastH * 0.6, T.L * 0.08), scl(Math.max(1.2, T.B * 0.12), T.mastH * 0.5, Math.max(1.2, T.B * 0.12))), dk);
+  }
+  return (T._warpS = finish(b));
+}
 function drawUnit(t, discs) {
   if (t.type.ship) { drawShip(t); return; }
   const T = t.type, dead = !t.alive, plain = dead ? [0.085, 0.08, 0.075] : [1, 1, 1], sp = dead ? 0.04 : T.air ? 0.5 : 0.3; // pass 31: was 0.2, which left white stars, roundels and red spinners readable on charred wrecks (hull is 0.16 x paint, about 0.07)
   const d = shadowPass ? 1e9 : viewDist(t.pos);
+  if (!shadowPass && SOFTWARE_GL && d > frameU.fogFar + 150) return;
   if (T.air) {
     const tint = dead ? [0.16, 0.15, 0.14] : t.tint || AIR_TINT[t.team];
+    if (SOFTWARE_GL && !shadowPass && d > 110) { draw(planeWarpMesh(T), t.M, tint, 0, 1, sp); return; }
     draw(T.planeMesh, t.M, tint, 0, 1, sp);
-    if (d < 260 || (shadowPass && t.isPlayer)) draw(T.planeDetail, t.M, plain, 0, 1, sp);
-    if (d < 200 && !shadowPass && (T.key === "albatross" || T.key === "petrel")) { const pm = airPolishMesh(T); if (pm) { draw(pm.m, t.M, plain, 0, 1, sp); if (!dead) draw(pm.l, t.M, WHITE, (now * 1.2) % 1 < 0.55 ? 1 : 0.5, 1, 0); } }
+    if (d < (SOFTWARE_GL ? 95 : 260) || (shadowPass && t.isPlayer)) draw(T.planeDetail, t.M, plain, 0, 1, sp);
+    if (d < (SOFTWARE_GL ? 80 : 200) && !shadowPass && (T.key === "albatross" || T.key === "petrel")) { const pm = airPolishMesh(T); if (pm) { draw(pm.m, t.M, plain, 0, 1, sp); if (!dead) draw(pm.l, t.M, WHITE, (now * 1.2) % 1 < 0.55 ? 1 : 0.5, 1, 0); } }
     if (d < 400) { drawRecGear(t, plain, sp); drawPlGear(t, plain, sp); }
     if (d > 600) return;
     if (T.heli) { draw(T.propMesh, chain(t.M, trans(...T.propPos), rotY(t.propA * 2.2)), plain, 0, 1, sp); if (d < 300) draw(T.tailMesh, chain(t.M, trans(0.35, 1.0, -8.7), rotX(t.propA * 5)), plain, 0, 1, sp); if (!dead && !shadowPass) discs.push([chain(t.M, trans(T.propPos[0], T.propPos[1] + 0.1, T.propPos[2]), rotX(Math.PI / 2), scl(T.propR, T.propR, 1)), 0.13]); }
@@ -15612,9 +16089,15 @@ function drawUnit(t, discs) {
     return;
   }
   // beyond ~90 m (or in the shadow map) the simplified meshes are used: no track links, bolts or decals
-  const tint = dead ? [0.16, 0.15, 0.14] : t.tint || TEAM_TINT[t.team], lo = d > 90 && T.hullLo;
-  const ut = !shadowPass && cur.u.uTrk; if (ut && t.trk) gl.uniform2f(ut, t.trk[0], t.trk[1]);
+  const tint = dead ? [0.16, 0.15, 0.14] : t.tint || TEAM_TINT[t.team];
   const hM = t.VM || t.M, tM = t.VTM || t.TM, gM = t.VGM || t.GM; // draw-only sway (pass 14)
+  if (SOFTWARE_GL && !shadowPass && d > (player && player.type && player.type.foot ? 55 : 95)) {
+    const wm = tankWarpMeshes(T);
+    draw(wm.h, hM, tint, 0, 1, sp); draw(wm.t, tM, tint, 0, 1, sp); draw(wm.g, t.recoil > 0 ? mul(gM, trans(0, 0, -t.recoil * 0.9)) : gM, tint, 0, 1, sp);
+    return;
+  }
+  const lo = d > (SOFTWARE_GL ? (player && player.type && player.type.foot ? 14 : 28) : 90) && T.hullLo;
+  const ut = !shadowPass && cur.u.uTrk; if (ut && t.trk) gl.uniform2f(ut, t.trk[0], t.trk[1]);
   draw(lo ? T.hullLo : T.hullMesh, hM, tint, 0, 1, sp);
   if (ut && t.trk) gl.uniform2f(ut, 0, 0);
   if (T.hullDecal && !lo) draw(T.hullDecal, hM, plain, 0, 1, sp);
@@ -17650,7 +18133,7 @@ document.addEventListener("pointerdown", () => { if (state === "cine") { initAud
 // The last few maps stay cached, so switching back and forth between modes is instant; older ones free their GPU meshes.
 const MAP_CACHE = new Map(), MAP_CACHE_MAX = 3;
 let SEED0 = null, mapKey = null, MAPL = null; // MAPL: the map's own cover (Winter Ridge berms, the fortress rings)
-const MESH_KEYS = ["terrainMesh", "propsMesh", "outerMesh", "cloudMesh", "roadMesh", "vegMesh", "waterMesh"];
+const MESH_KEYS = ["terrainMesh", "propsMesh", "propsDetMesh", "outerMesh", "cloudMesh", "roadMesh", "vegMesh", "waterMesh"];
 function freeMesh(m) {
   if (!m) return;
   for (const b of m.bufs) gl.deleteBuffer(b);
@@ -17669,7 +18152,7 @@ function loadMap(key) {
   if (S) {
     MAP_CACHE.delete(D.key); MAP_CACHE.set(D.key, S); // most recently used last
     HM.set(S.HM); OH.set(S.OH); NH = S.NH || null; TERRAIN_MAX = S.TERRAIN_MAX; flats = S.flats; craters = S.craters; SNX = S.SNX;
-    terrainMesh = S.terrainMesh; propsMesh = S.propsMesh; outerMesh = S.outerMesh; cloudMesh = S.cloudMesh; roadMesh = S.roadMesh; vegMesh = S.vegMesh; waterMesh = S.waterMesh;
+    terrainMesh = S.terrainMesh; propsMesh = S.propsMesh; propsDetMesh = S.propsDetMesh; outerMesh = S.outerMesh; cloudMesh = S.cloudMesh; roadMesh = S.roadMesh; vegMesh = S.vegMesh; waterMesh = S.waterMesh;
     buildings.length = 0; buildings.push(...S.buildings); trees.length = 0; trees.push(...S.trees); PAVED.length = 0; PAVED.push(...S.PAVED); AUTH = S.AUTH;
     minimapBg.getContext("2d").drawImage(S.mini, 0, 0);
     S.zy.forEach((y, i) => { ZONE_POS[i][1] = y; }); S.by.forEach((y, i) => { BASES[i][1] = y; });
@@ -17686,12 +18169,13 @@ function loadMap(key) {
     S = { HM: HM.slice(), OH: OH.slice(), NH, TERRAIN_MAX, flats, craters, SNX, buildings: buildings.slice(), trees: trees.slice(), PAVED: PAVED.slice(), AUTH, mini,
       zy: ZONE_POS.map(z => z[1]), by: BASES.map(b => b[1]), OPL, DDL, MAPL, SKL,
       NAV: { n: NAV.n, base: NAV.base, cov: NAV.cov, g: NAV.g, par: NAV.par, seen: NAV.seen, done: NAV.done, hi: NAV.hi, hk: NAV.hk } }; // not the search stamp: it must keep counting up (the scratch arrays remember old stamps)
-    for (const k of MESH_KEYS) S[k] = { terrainMesh, propsMesh, outerMesh, cloudMesh, roadMesh, vegMesh, waterMesh }[k];
+    for (const k of MESH_KEYS) S[k] = { terrainMesh, propsMesh, propsDetMesh, outerMesh, cloudMesh, roadMesh, vegMesh, waterMesh }[k];
     MAP_CACHE.set(D.key, S);
     while (MAP_CACHE.size > MAP_CACHE_MAX) { const [k0, old] = MAP_CACHE.entries().next().value; MAP_CACHE.delete(k0); for (const k of MESH_KEYS) freeMesh(old[k]); }
   }
   mapKey = D.key;
   for (const t of trees) { t.falling = false; t.fall = 0; t.M = chain(trans(t.x, t.y, t.z), scl(t.s, t.s, t.s)); }
+  rebuildStaticGrids();
   return true;
 }
 // the map's own cover, set up like the Operation's: earth berms on Winter Ridge (the enemy's dug-in lines in front of
@@ -17740,13 +18224,14 @@ function frameBody(t) {
   if (state !== lastState) { frozen = false; lastState = state; }
   if (state === "playing" && M.sandbox) sbFrame(dt); // the editor camera and panel, also while the sandbox is paused
   if (state === "playing" && !(M.sandbox && SB.paused)) {
-    // below 20 fps one frame covers several 50 ms steps (up to 0.25 s), so the battle clock and the
-    // 20-minute limit keep pace with real time instead of slowing down with the frame rate
+    // below 20 fps one frame covers several 50 ms steps (up to 0.15 s), so the battle clock and the
+    // 20-minute limit keep pace without triggering worst-case slow-frame substep spirals
     const s0 = performance.now();
-    let left = clamp(ms / 1000, 0, 0.25) * timeScale * (M.sandbox ? SB.speed : 1) * feelScale(clamp(ms / 1000, 0, 0.1)); // feelScale: hit-stop / kill slow-down // timeScale: console-only slow motion for capturing effects (steelFront.timeScale)
+    let left = clamp(ms / 1000, 0, 0.15) * timeScale * (M.sandbox ? SB.speed : 1) * feelScale(clamp(ms / 1000, 0, 0.1)); // feelScale: hit-stop / kill slow-down // timeScale: console-only slow motion for capturing effects (steelFront.timeScale)
+    const totalStep = left;
     do {
-      const h = Math.min(0.05, left), wasAlive = player.alive;
-      step(h); left -= h;
+      const h = Math.min(0.05, left), wasAlive = player.alive; left -= h;
+      step(h, left <= 1e-4 ? totalStep : null);
       if (wasAlive && !player.alive) respawnT = 6;
     } while (left > 1e-4 && state === "playing");
     if (M.sandbox && SB.edit && SB.spec && tanks.includes(SB.spec)) sbSpecCam(0); // GUE-5: the spectate camera sits on where the vehicle is after this frame's steps
@@ -17760,10 +18245,11 @@ function frameBody(t) {
   // no engine drone behind the pause / results screen
   if (engGain && state !== "playing") engGain.gain.setTargetAtTime(0, AC.currentTime, 0.05);
   const live = state === "playing" || state === "menu" || state === "cine";
+  mmAcc += clamp(ms / 1000, 0, 0.1);
   if (live || !frozen) {
     render();
     drawHud(); if (state === "playing" || state === "paused") drawFootPicker(hud.width, hud.height); // GUE-7
-    if (state !== "cine" && state !== "menu") drawMinimap();
+    if (state !== "cine" && state !== "menu" && (mmAcc >= 0.055 || state !== "playing")) { mmAcc = 0; drawMinimap(); }
     frozen = !live;
   }
   if (state !== "cine" && state !== "menu") updateDom(dt);
