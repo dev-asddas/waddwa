@@ -1242,7 +1242,7 @@
 // errors are collected, and a failure turns the boot screen into a diagnostic panel. No personal data is collected:
 // build, stage, error text, browser/engine version, WebGL support and the GPU renderer string.
 (() => {
-  const B = window.__SF_BOOT = { build: "pass 54 r6 (SAS-5) · 2026-11-23", stage: "html", stages: [], errors: [], t0: performance.now(), ready: false, failed: false,
+  const B = window.__SF_BOOT = { build: "pass 54 r7 (SAS-5) · 2026-11-24", stage: "html", stages: [], errors: [], t0: performance.now(), ready: false, failed: false,
     fail: (/[?&]bootfail=([a-z]+)/.exec(location.search) || [])[1] || "" }; // ?bootfail=webgl|storage|shader|shaderall|throw: test hooks only
   B.src = "<!DOCTYPE html>\n" + document.documentElement.outerHTML + "\n"; // clean copy for the download button (taken before anything changes)
   const $b = q => document.querySelector("#boot " + q);
@@ -12902,7 +12902,7 @@ function sbSpecCam(dt) {
 }
 function sbEnter() {
   if (SB.edit || !M.sandbox || state !== "playing") return;
-  SB.edit = true; SB.drag = false; mouseDown = false; keys.clear();
+  SB.edit = true; SB.drag = false; mouseDown = false; mouseTap = false; footTaps.clear(); keys.clear();
   SB.keepYaw = cam.yaw; SB.keepPitch = cam.pitch;
   const d = cam.dir; SB.cy = Math.atan2(d[0], d[2]); SB.cp = clamp(Math.asin(clamp(d[1], -1, 1)) - 0.3, -1.45, 0.4);
   SB.cpos = vadd(cam.pos, [0, 18, 0]); SB.cpos[1] = Math.max(SB.cpos[1], heightAt(SB.cpos[0], SB.cpos[2]) + 25);
@@ -12911,7 +12911,7 @@ function sbEnter() {
 }
 function sbExit() {
   if (!SB.edit) return;
-  SB.edit = false; SB.drag = false; SB.paused = false; SB.follow = false; SB.spec = null; keys.clear(); mouseDown = false;
+  SB.edit = false; SB.drag = false; SB.paused = false; SB.follow = false; SB.spec = null; keys.clear(); mouseDown = false; mouseTap = false; footTaps.clear();
   cam.yaw = SB.keepYaw; cam.pitch = SB.keepPitch; cam.boom = undefined;
   document.body.classList.remove("sb-edit"); sbRender();
   if (state === "playing" && !noLock) requestLock();
@@ -13949,7 +13949,7 @@ function footEnter(role, quiet = false, keepPref = false) {
 function footSpawn(p, quiet = false) {
   if (p.inf) { const i = INF.indexOf(p.inf); if (i >= 0) INF.splice(i, 1); }
   p.type = footType(p.footRole); p.hp = p.type.hp; p.alive = true; p.deadT = 0; p.killedBy = null; p.speed = 0; p.reloadT = 0; p.reloadFull = p.type.reload; p.repairT = 0;
-  p.F = footState(p); cam.sniper = false; respawnT = 0; p.footSave = null; p.boardWant = null;
+  p.F = footState(p); cam.sniper = false; respawnT = 0; p.footSave = null; p.boardWant = null; mouseTap = false; footTaps.clear(); // SAS-5 (r7): no stale tap into a new life
   let at = null, boat = null;
   if (M.key === "dday" && ms.dd && DDL && ms.dd.stage === 0) { // H-hour: a squad landing craft, you at the ramp; it grounds, the ramp drops, off you go
     const x = IFC.boats[(Math.random() * IFC.boats.length) | 0] + rand(-12, 12), n0 = boats.length; infBoat(x, false); boat = boats[n0]; if (boat) at = [boat.x, boat.z];
@@ -14017,6 +14017,7 @@ function footArty(team) { if (!ms.ftArty) ms.ftArty = []; if (!ms.ftArty[team]) 
 // ---- per-frame player soldier: input, movement, collision, weapon, role tools
 function footStep(p, dt) {
   const f = p.F, T = p.type, Wp = T.Wp, R = T.R, edit = M.sandbox && SB.edit;
+  const tapFire = mouseTap, tapR = footTaps.has("KeyR"); mouseTap = false; footTaps.clear(); // SAS-5 (r7): this step's taps, read once
   f.flashT = Math.max(0, f.flashT - dt); f.fireHold = Math.max(0, (f.fireHold || 0) - dt); f.kick = Math.max(0, f.kick - dt * 6); f.fireCd -= dt; f.boltT = Math.max(0, f.boltT - dt);
   if (f.deck && shipOk(f.deck.ship)) { const D = f.deck; if (!p.alive) p.pos = footDeckW(D.ship, D.lx, D.lz); } // the deck carries you (and where you fell)
   else if (f.deck && p.alive) { const S = f.deck.ship; footDie(S && S.lastHitBy && S.lastHitBy.team !== p.team ? S.lastHitBy : null); centerMsg("YOUR SHIP WENT DOWN UNDER YOU", "#ff8a6a"); }
@@ -14089,8 +14090,8 @@ function footStep(p, dt) {
   f.stepAcc += sp * dt; if (f.stepAcc > strideLen && !f.air) { f.stepAcc = 0; if (AC && AC.state === "running") noiseHit(0.02 + f.runS * 0.03, wd > 0.15 ? 700 : 1500, 400, 0.05); if (wd > 0.15 && Math.random() < 0.6) puff([p.pos[0], WATER_Y + 0.05, p.pos[2]], [0, 1.2, 0], [0.85, 0.9, 0.95], 0.4, 0.2, 4, 0, 0.8, 0.5); }
   // weapon: reload, fire (hitscan bullets or a rocket), bolt cycle
   if (reloading) { f.relT -= dt; p.reloadT = Math.max(0, f.relT); if (f.relT <= 0) { const n = Math.min(Wp.mag - f.mag, f.res); f.mag += n; f.res -= n; f.relT = 0; p.reloadT = 0; } }
-  if (!edit && !f.ride && keys.has("KeyR") && !reloading && f.mag < Wp.mag && f.res > 0 && !fixing) footReload(p);
-  const trig = mouseDown && !edit && !f.ride && !fixing;
+  if (!edit && !f.ride && (keys.has("KeyR") || tapR) && !reloading && f.mag < Wp.mag && f.res > 0 && !fixing) footReload(p);
+  const trig = (mouseDown || tapFire) && !edit && !f.ride && !fixing;
   if (trig && f.mag <= 0 && !reloading && f.res > 0 && !f.trig) footReload(p);
   if (trig && f.mag > 0 && !reloading && f.fireCd <= 0 && f.boltT <= 0 && !(Wp.semi && f.trig) && f.sprS < 0.3 && f.thrS < 0.2) footFire(p);
   f.trig = trig;
@@ -14187,7 +14188,10 @@ function drawFootLock(p, f, W, H) {
     const kind = f.lock.type ? (f.lock.type.air ? "AIR" : f.lock.type.ship ? "SHIP" : "VEHICLE") : "INFANTRY", dist = Math.round(vlen(vsub(footLockC(f.lock), p.pos)));
     label(f.lockLost > 0 ? "REACQUIRING" : locked ? `LOCKED ${kind} · ${dist} m` : `LOCKING ${Math.round(k * 100)}%`, q[0], q[1] - sz - 12, col);
     if (locked) label(f.mag > 0 && f.relT <= 0 ? "FIRE: rocket homes" : "RELOADING", q[0], q[1] + sz + 18, col); }
-  else label("SEEKER · hold the crosshair on an enemy", cx, cy + r + 18, "rgba(255,255,255,.75)");
+  // SAS-5 (r7): above the circle (below it sit RELOADING, the deck and boarding notes, the U prompts and the hit banner), and
+  // not while a centre or hit message is up (the centre line can sit lower on short windows), so it never overprints them
+  else if (centerTimer <= 0 && hitTimer <= 0 && !$("center")._t) { const y = Math.max(cy - r - 10, hudTop() + 14); // never up under the compass band and its range pill
+    if (y < cy - 14) label("SEEKER · hold the crosshair on an enemy", cx, y, "rgba(255,255,255,.75)"); } // on a very short window: no room, no hint
   hx.restore();
 }
 function footReload(p) { const f = p.F, W = p.type.Wp; f.relT = f.relFull = W.rel * (f.mag > 0 && !W.rocket ? 0.85 : 1); p.reloadFull = f.relFull; f.adsS = Math.min(f.adsS, 0.5); if (AC && AC.state === "running") noiseHit(0.05, 2400, 900, 0.05); }
@@ -14347,7 +14351,7 @@ function footRedeploy(what) {
 }
 function footWantStep(dt) {
   if (!footWant) return; const p = player;
-  if (!p.alive) { footWant = null; return; }
+  if (!p.alive) { const w = footWant.what; footWant = null; footRedeploy(w); return; } // SAS-5 (r7): killed during the countdown, the choice becomes the next deployment (was dropped)
   if ((footWant.t -= dt) > 0) return;
   const w = footWant.what; footWant = null;
   if (w === "veh") { if (p.type.foot) footLeave(); else if (footNaval() && p.rideV && p.type.air && !shipAlive(plShip(p))) navFreshShip(p); }
@@ -14798,7 +14802,7 @@ function endBattle(result, reason) {
   if (state !== "playing") return;
   outcome = { result, reason, a: Math.round(tickets[0]), e: Math.round(tickets[1]) };
   outcome.rewards = grantRewards(outcome);
-  mouseDown = false; keys.clear();
+  mouseDown = false; mouseTap = false; footTaps.clear(); keys.clear();
   showMenu("over");
   if (locked()) document.exitPointerLock();
 }
@@ -14839,6 +14843,9 @@ function showMenu(mode) {
 // ---------------------------------------------------------------- input
 const keys = new Set();
 let mouseDown = false, noLock = false, freeDir = null;
+// SAS-5 (r7): a click or an R press that goes down and up between two frames still counts once on foot (at a low frame
+// rate a quick tap was lost: fire and reload only saw the held state). Consumed by the next step, cleared with mouseDown.
+let mouseTap = false; const footTaps = new Set();
 const locked = () => document.pointerLockElement === canvas;
 const requestLock = () => {
   try { const r = canvas.requestPointerLock(); if (r && r.catch) r.catch(() => { noLock = true; }); } catch (e) { noLock = true; }
@@ -14864,7 +14871,7 @@ $("toHangar").addEventListener("click", () => showMenu("start")); // leaving a p
 canvas.addEventListener("click", () => { if (state === "playing" && !locked() && !noLock && !(M.sandbox && SB.edit)) requestLock(); });
 document.addEventListener("pointerlockerror", () => { noLock = true; });
 document.addEventListener("pointerlockchange", () => {
-  keys.clear(); mouseDown = false;
+  keys.clear(); mouseDown = false; mouseTap = false; footTaps.clear();
   if (!locked() && state === "playing" && !(M.sandbox && SB.edit)) showMenu("paused"); // the sandbox editor frees the cursor on purpose
 });
 $("repair").addEventListener("click", e => {
@@ -14893,7 +14900,7 @@ canvas.addEventListener("mousedown", e => {
   if (state !== "playing") return;
   e.preventDefault();
   if (M.sandbox && SB.edit) { SB.mouse = [e.clientX, e.clientY]; if (e.button === 0) sbClick(e.clientX, e.clientY); else if (e.button === 2) SB.drag = true; return; }
-  if (e.button === 0) mouseDown = true;
+  if (e.button === 0) { mouseDown = true; mouseTap = true; }
   if (e.button === 2) cam.sniper = player && player.type.foot ? true : !cam.sniper; // GUE-7: on foot, hold to aim
 });
 document.addEventListener("mouseup", e => { if (e.button === 0) mouseDown = false; if (e.button === 2) { SB.drag = false; if (player && player.type && player.type.foot) cam.sniper = false; } });
@@ -14939,6 +14946,7 @@ document.addEventListener("keydown", e => {
   if (e.code === "Space" || e.code.startsWith("Arrow")) e.preventDefault();
   keys.add(e.code);
   if (e.repeat) return;
+  if (e.code === "KeyR") footTaps.add("KeyR"); // SAS-5 (r7): kept until the next step reads it
   if (e.code === "KeyU") { vehUse(); return; } // pass 42: get in / get out
   if (player.type.foot && footKeys(e)) return; // GUE-7: the soldier's own keys
   if (e.code === "ShiftLeft" || e.code === "ShiftRight") cam.sniper = !cam.sniper;
@@ -14971,7 +14979,7 @@ document.addEventListener("keydown", e => {
   }
 });
 document.addEventListener("keyup", e => { keys.delete(e.code); if (e.code === cine.skipKey) cine.skipKey = null; if (e.code === "KeyC" && freeDir && player.type.air) { const d = freeDir; cam.yaw = Math.atan2(d[0], d[2]); cam.pitch = Math.asin(clamp(d[1], -1, 1)); freeDir = null; } });
-window.addEventListener("blur", () => { keys.clear(); mouseDown = false; cine.skipKey = null; });
+window.addEventListener("blur", () => { keys.clear(); mouseDown = false; mouseTap = false; footTaps.clear(); cine.skipKey = null; });
 
 let timeScale = 1;
 let frozen = false; // paused / battle over: the scene behind the menu is drawn once, not every frame
@@ -15142,6 +15150,7 @@ function step(dt) {
   const edit = M.sandbox && SB.edit; // sandbox editor open: the keys and the mouse belong to the free camera
   footWantStep(dt); navLostNote(player); // GUE-7: a role change or a return to the vehicle, after its short countdown
   vehStep(dt); // pass 42: boarding a vehicle you signalled to stop
+  if (!p.type.foot) { mouseTap = false; footTaps.clear(); } // SAS-5 (r7): taps only count on foot; none carried into a later deployment
   if (p.type.foot) { if (!p.alive) respawnT -= dt; footStep(p, dt); if (!p.alive && respawnT <= 0) { if (p.footRole && footOk()) footSpawn(p); else footLeave(); } }
   else if (p.alive && p.type.air && edit) { // the plane loiters on autopilot: a gentle left-hand circle at a safe height
     const yw = Math.atan2(p.Z[0], p.Z[2]) + 0.35, g = Math.max(heightAt(p.pos[0], p.pos[2]), heightAt(p.pos[0] + p.Z[0] * 300, p.pos[2] + p.Z[2] * 300));
@@ -17553,7 +17562,7 @@ function endCinematic(deploy) {
   }
   cine.bus = null; cine.snd = null; cine.nodes = [];
   ({ tanks, shells, parts } = cine.saved); cine.saved = null; cine.cast = null;
-  cam.fov = 1.1; cam.sniper = false; keys.clear(); mouseDown = false;
+  cam.fov = 1.1; cam.sniper = false; keys.clear(); mouseDown = false; mouseTap = false; footTaps.clear();
   document.body.classList.remove("cine-on");
   cineEl.classList.remove("run", "title"); cineEl.hidden = true;
   $("cineCap").classList.remove("on");
