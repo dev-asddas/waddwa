@@ -1242,7 +1242,7 @@
 // errors are collected, and a failure turns the boot screen into a diagnostic panel. No personal data is collected:
 // build, stage, error text, browser/engine version, WebGL support and the GPU renderer string.
 (() => {
-  const B = window.__SF_BOOT = { build: "pass 54 r7b (SAS-5) · 2026-11-24", stage: "html", stages: [], errors: [], t0: performance.now(), ready: false, failed: false,
+  const B = window.__SF_BOOT = { build: "pass 54 r8 (SAS-5) · 2026-11-24", stage: "html", stages: [], errors: [], t0: performance.now(), ready: false, failed: false,
     fail: (/[?&]bootfail=([a-z]+)/.exec(location.search) || [])[1] || "" }; // ?bootfail=webgl|storage|shader|shaderall|throw: test hooks only
   B.src = "<!DOCTYPE html>\n" + document.documentElement.outerHTML + "\n"; // clean copy for the download button (taken before anything changes)
   const $b = q => document.querySelector("#boot " + q);
@@ -12298,8 +12298,15 @@ function feelScale(dt) {
   if (FEEL.slow > 0) { FEEL.slow = Math.max(0, FEEL.slow - dt); return lerp(1, 0.4, smoothstep(0, FEEL.slowMax, FEEL.slow)); }
   return 1;
 }
+// SAS-5 (r8): the spring is stepped at 1/60 s or less. One step of a long frame (over ~0.08 s, under ~12 fps) made it
+// grow instead of settle, and the view flipped up and down for good after a shot; at 60 fps and above nothing changes
 function kickStep(dt) {
-  FEEL.kv += (-130 * FEEL.kick - 19 * FEEL.kv) * dt; FEEL.kick += FEEL.kv * dt; FEEL.fov *= Math.exp(-dt * 8);
+  if (!(dt > 0)) return;
+  if (!Number.isFinite(FEEL.kick) || !Number.isFinite(FEEL.kv)) FEEL.kick = FEEL.kv = 0;
+  if (!Number.isFinite(FEEL.fov)) FEEL.fov = 0;
+  const n = Math.min(12, Math.ceil(dt * 60 - 1e-6)), h = dt / n;
+  for (let i = 0; i < n; i++) { FEEL.kv += (-130 * FEEL.kick - 19 * FEEL.kv) * h; FEEL.kick += FEEL.kv * h; }
+  FEEL.kick = clamp(FEEL.kick, -4, 4); FEEL.kv = clamp(FEEL.kv, -80, 80); FEEL.fov *= Math.exp(-dt * 8);
   if (Math.abs(FEEL.kick) < 1e-4 && Math.abs(FEEL.kv) < 1e-3) FEEL.kick = FEEL.kv = 0;
 }
 // destroyed tanks (pass 11): an ammunition fire or a heavy kill throws the turret clear, the ammunition cooks off a
@@ -13569,6 +13576,7 @@ function footNavalThreat(p, f, dt) {
   }
 }
 let footPick = false, footWant = null; // the role picker is open; a redeploy chosen while alive (role key, or "veh")
+let footNextNote = null; // SAS-5 (r8): the deployment chosen while dead, kept on the death banner until the respawn
 let footPref = null; try { footPref = localStorage.getItem("steelfront.foot") || null; if (footPref && !FOOT_RK[footPref]) footPref = null; } catch (e) { footPref = null; }
 const footGren = [];
 
@@ -14730,7 +14738,7 @@ function footKey(e) {
 function footRedeploy(what) {
   const p = player;
   if (!p.alive) { if (what === "veh") { p.footRole = null; footPref = null; try { localStorage.removeItem("steelfront.foot"); } catch (e) { /* */ } } else { p.footRole = what; footPref = what; try { localStorage.setItem("steelfront.foot", what); } catch (e) { /* */ } }
-    centerMsg(`NEXT DEPLOYMENT: ${what === "veh" ? "YOUR VEHICLE" : FOOT_RK[what].name.toUpperCase()}`, "#7cc0ff"); return; }
+    footNextNote = `NEXT DEPLOYMENT: ${what === "veh" ? "YOUR VEHICLE" : FOOT_RK[what].name.toUpperCase()}`; centerMsg(footNextNote, "#7cc0ff"); return; }
   footWant = { what, t: p.type.foot && p.F && now - p.F.hurtT > 6 ? 1.2 : 3 };
   centerMsg(`REDEPLOYING AS ${what === "veh" ? "VEHICLE" : FOOT_RK[what].name.toUpperCase()} in ${Math.ceil(footWant.t)} s`, "#7cc0ff");
 }
@@ -15169,7 +15177,7 @@ function newBattle() {
   }
   allyFollow = allyFollowDefault(); // GUE-6 pass 28: the follow order starts as pass 27 behaved (see allyFollowDefault)
   infSetup(); // every mode's infantry: D-Day landings, conquest squads, dug-in defenders, garrisons (see INF_MODE)
-  cam.yaw = 0; cam.pitch = -0.08; cam.sniper = false; footPick = false; footWant = null; footGren.length = 0;
+  cam.yaw = 0; cam.pitch = -0.08; cam.sniper = false; footPick = false; footWant = null; footNextNote = null; footGren.length = 0;
   if (footPref && footOk()) { footEnter(footPref, true); allyFollow = allyFollowDefault(); } // GUE-7: you last deployed on foot
   $("killfeed").innerHTML = "";
   setHtml($("keyHint"), M.sandbox ? "<b>O sandbox editor</b> · I infantry · U get in / out · Y allies follow · H controls · N mute · F9 diagnostics · Esc pause &amp; settings" : "I infantry roles · U get in / out · Y allies follow · H controls · N mute · P fps · F9 diagnostics · Esc pause &amp; settings");
@@ -16417,7 +16425,8 @@ function updateDom(dt) {
   }
   // capture prompt
   const zi = zones.findIndex(z => z.playerIn);
-  if (!t.alive) { txt($("center"), `${t.killedBy ? `DESTROYED by ${t.killedBy.name}` : t.crashed ? "CRASHED" : "DESTROYED"}\nRespawning in ${Math.max(0, respawnT).toFixed(0)}…${M.key === "laststand" || M.key === "dday" ? ` · ${tickets[0]} reinforcements left` : M.key === "strike" ? ` · ${tickets[0]} sortie${tickets[0] === 1 ? "" : "s"} left` : ""}`); css($("center"), "color", "#ff8a6a"); centerTimer = 0.2; }
+  if (t.alive) footNextNote = null; // SAS-5 (r8): alive again, the choice has been applied
+  if (!t.alive) { txt($("center"), `${t.killedBy ? `DESTROYED by ${t.killedBy.name}` : t.crashed ? "CRASHED" : "DESTROYED"}\nRespawning in ${Math.max(0, respawnT).toFixed(0)}…${M.key === "laststand" || M.key === "dday" ? ` · ${tickets[0]} reinforcements left` : M.key === "strike" ? ` · ${tickets[0]} sortie${tickets[0] === 1 ? "" : "s"} left` : ""}${footNextNote ? `\n${footNextNote}` : ""}`); css($("center"), "color", "#ff8a6a"); centerTimer = 0.2; }
   else if (zi >= 0 && centerTimer <= 0) {
     const z = zones[zi];
     txt($("center"), z.locked || z.active ? "" : z.name ? `${z.name.toUpperCase()}: NOT YOUR OBJECTIVE YET` : `ZONE ${z.label} IS NOT OPEN YET`); // capture progress is the ring over the hull indicator
